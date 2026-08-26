@@ -1,0 +1,42 @@
+command: ["streamlit", "run", "app.py", "--server.port=8000", "--server.address=0.0.0.0"]
+
+env:
+  # --- Token de Hugging Face (opcional) ---
+  # Crea el secret en el scope de Databricks antes de desplegar:
+  #   databricks secrets create-scope centro-cx
+  #   databricks secrets put-secret centro-cx hf-token
+  # Sin este token la app funciona igual: BERT corre local y el copiloto
+  # responde en modo analítico determinístico.
+  - name: HF_TOKEN
+    valueFrom: hf-token
+
+  # --- Caché de modelos ---
+  # Evita re-descargar ~1.2 GB en cada rerun. Si tienes un volumen
+  # persistente montado, apunta estas rutas ahí en lugar de /tmp.
+  - name: HF_HOME
+    value: /tmp/hf_cache
+  - name: HF_HUB_CACHE
+    value: /tmp/hf_cache/hub
+  - name: TRANSFORMERS_CACHE
+    value: /tmp/hf_cache/transformers
+
+  # --- Modelos (sobreescribibles sin tocar el código) ---
+  - name: CX_MODELO_SENT
+    value: nlptown/bert-base-multilingual-uncased-sentiment
+  - name: CX_MODELO_ZS
+    value: MoritzLaurer/mDeBERTa-v3-base-mnli-xnli
+  - name: CX_MODELO_LLM
+    value: meta-llama/Llama-3.3-70B-Instruct
+
+  # --- Rendimiento en CPU ---
+  # Limita los hilos de torch para que no compita con Streamlit.
+  - name: OMP_NUM_THREADS
+    value: "4"
+  - name: TOKENIZERS_PARALLELISM
+    value: "false"
+
+  # --- Streamlit ---
+  - name: STREAMLIT_SERVER_ENABLE_STATIC_SERVING
+    value: "true"
+  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"

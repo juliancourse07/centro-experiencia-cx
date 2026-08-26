@@ -1,0 +1,8 @@
+streamlit>=1.36
+pandas>=2.1
+plotly>=5.20
+transformers>=4.44
+torch>=2.2
+huggingface_hub>=0.24
+sentencepiece>=0.2
+protobuf>=4.25
