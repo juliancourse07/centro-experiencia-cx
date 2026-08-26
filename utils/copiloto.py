@@ -8,6 +8,9 @@ import streamlit as st
 
 MODELO_LLM = os.getenv("CX_MODELO_LLM", "meta-llama/Llama-3.3-70B-Instruct")
 
+# Compilado a nivel de módulo: NO puede ir dentro de un f-string (SyntaxError en Python < 3.12)
+_ESPACIOS = re.compile(r"\s+")
+
 SYSTEM = """Eres un analista de experiencia de cliente (CX) de una aseguradora colombiana.
 Respondes en español, en máximo 6 viñetas, con foco en acción de negocio.
 Usa ÚNICAMENTE los datos del contexto. Si el dato no está, dilo explícitamente.
@@ -28,6 +31,11 @@ def cliente_llm():
         return None
     from huggingface_hub import InferenceClient
     return InferenceClient(model=MODELO_LLM, token=tok)
+
+
+def _limpiar(texto, limite: int = 220) -> str:
+    """Colapsa espacios y recorta. Se usa fuera de f-strings a propósito."""
+    return _ESPACIOS.sub(" ", str(texto)).strip()[:limite]
 
 
 # ---------------------------------------------------------------
@@ -52,7 +60,7 @@ def ranking_negativos(verb: pd.DataFrame, dimension: str, top: int = 10) -> pd.D
     return out.sort_values(["negativos", "% negativos"], ascending=False).head(top)
 
 
-def detectar_intencion(pregunta: str) -> str | None:
+def detectar_intencion(pregunta: str):
     p = pregunta.lower()
     neg = any(w in p for w in ["malo", "negativ", "queja", "detractor", "dolor", "peor", "insatisf"])
     if neg and any(w in p for w in ["intermediar", "asesor", "agente", "corredor"]):
@@ -66,7 +74,7 @@ def detectar_intencion(pregunta: str) -> str | None:
     return None
 
 
-def construir_contexto(verb: pd.DataFrame, kpis: dict, pregunta: str) -> tuple[str, pd.DataFrame]:
+def construir_contexto(verb: pd.DataFrame, kpis: dict, pregunta: str):
     partes = [
         "KPIs del período filtrado:",
         f"- NPS: {kpis.get('nps')}, INS: {kpis.get('ins')}, CES: {kpis.get('ces')}",
@@ -74,6 +82,11 @@ def construir_contexto(verb: pd.DataFrame, kpis: dict, pregunta: str) -> tuple[s
         f"- Filtros activos: {kpis.get('filtros')}",
     ]
     tabla = pd.DataFrame()
+
+    if verb is None or verb.empty:
+        partes.append("\nNo hay verbatims disponibles para el filtro actual.")
+        return "\n".join(partes), tabla
+
     intencion = detectar_intencion(pregunta)
 
     dim = {
@@ -101,12 +114,13 @@ def construir_contexto(verb: pd.DataFrame, kpis: dict, pregunta: str) -> tuple[s
         muestras = verb[verb["polaridad"] == "Negativo"]["_texto"].head(15).tolist()
         if muestras:
             partes.append("\nComentarios negativos de ejemplo:")
-            partes += [f"- {re.sub(r'\\s+', ' ', str(m))[:220]}" for m in muestras]
+            for m in muestras:
+                partes.append("- " + _limpiar(m))
 
     return "\n".join(partes), tabla
 
 
-def responder(pregunta: str, verb: pd.DataFrame, kpis: dict) -> tuple[str, pd.DataFrame]:
+def responder(pregunta: str, verb: pd.DataFrame, kpis: dict):
     contexto, tabla = construir_contexto(verb, kpis, pregunta)
     cli = cliente_llm()
 
