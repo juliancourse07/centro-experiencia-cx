@@ -1,5 +1,6 @@
 import io
 import os
+from html import escape
 
 import pandas as pd
 import plotly.express as px
@@ -7,9 +8,10 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from utils.consultas import resumen, drivers, verbatims
+from utils.consultas import diagnostico, drivers, resumen, resumen_por_sucursal, verbatims
 from utils import nlp
 from utils.copiloto import responder, ranking_negativos
+from utils.iconos import icono, texto_icono, titulo_seccion
 
 # =====================================================
 # CONFIG
@@ -17,7 +19,6 @@ from utils.copiloto import responder, ranking_negativos
 
 st.set_page_config(
     page_title="Centro de Experiencia CX",
-    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -92,6 +93,8 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.cx-answer){
 
 .section{font-size:20px;font-weight:700;color:#072B7A;
     margin:26px 0 6px;padding-bottom:6px;border-bottom:2px solid #E3E9F5;}
+.cx-icon-text{display:inline-flex;align-items:center;gap:.5rem;line-height:1.2;}
+.cx-icon-text svg{display:block;flex:0 0 auto;}
 </style>
 """,
     unsafe_allow_html=True,
@@ -142,8 +145,23 @@ def normalizar(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900, show_spinner="Cargando datos de experiencia…")
-def cargar():
-    return normalizar(resumen()), normalizar(drivers()), normalizar(verbatims())
+def cargar_resumen():
+    return normalizar(resumen())
+
+
+@st.cache_data(ttl=900, show_spinner="Cargando resumen por sucursal…")
+def cargar_resumen_sucursal():
+    return normalizar(resumen_por_sucursal())
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cargar_drivers():
+    return normalizar(drivers())
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cargar_verbatims():
+    return normalizar(verbatims())
 
 
 def primera_col(df, candidatas):
@@ -211,8 +229,16 @@ def delta(actual, previo):
     return actual - previo
 
 
+def filtros_activos_texto():
+    filtros = [f"línea={linea}", f"tipo={tipo}", f"período={periodo}"]
+    if sucursal != "TODAS":
+        filtros.append(f"sucursal={sucursal}")
+    return ", ".join(filtros)
+
+
 def card(titulo, valor, delta_val=None, pie="", color_borde=NARANJA,
-         sufijo_delta="vs. período anterior"):
+         sufijo_delta="vs. período anterior", icon_name=None):
+    titulo_html = texto_icono(icon_name, titulo, size=16) if icon_name else escape(titulo)
     if delta_val is None or pd.isna(delta_val):
         bloque = "<div class='kpi-delta' style='color:#9AA3B2'>— sin comparativo</div>"
     else:
@@ -225,7 +251,7 @@ def card(titulo, valor, delta_val=None, pie="", color_borde=NARANJA,
         )
     st.markdown(
         f"<div class='kpi' style='border-top-color:{color_borde}'>"
-        f"<div class='kpi-title'>{titulo}</div>"
+        f"<div class='kpi-title'>{titulo_html}</div>"
         f"<div class='kpi-value'>{valor}</div>{bloque}"
         f"<div class='kpi-foot'>{pie}</div></div>",
         unsafe_allow_html=True,
@@ -278,7 +304,20 @@ def gauge(nombre, valor, metrica):
 
 
 def sin_datos(msg="No hay datos para los filtros seleccionados."):
-    st.markdown(f"<div class='insight warn'>⚠️ {msg}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='insight warn'>{texto_icono('alerta', msg, size=16)}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def mensaje_vacio(seccion, total_consulta, total_filtrado=0, extra=""):
+    msg = (
+        f"{seccion} sin resultados para los filtros activos ({filtros_activos_texto()}). "
+        f"Filas consulta: {total_consulta:,.0f}. Filas tras filtros: {total_filtrado:,.0f}."
+    )
+    if extra:
+        msg += f" {extra}"
+    sin_datos(msg)
 
 
 # =====================================================
@@ -286,52 +325,78 @@ def sin_datos(msg="No hay datos para los filtros seleccionados."):
 # =====================================================
 
 try:
-    df, drv, verb = cargar()
+    df_base = cargar_resumen()
 except Exception as e:
     st.error("No fue posible cargar los datos desde el origen.")
     st.exception(e)
     st.stop()
 
-if df is None or df.empty:
+if df_base is None or df_base.empty:
     st.error("La consulta de resumen no devolvió registros.")
     st.stop()
 
-COL_SUC = primera_col(df, COLS_SUCURSAL)
+try:
+    drv = cargar_drivers()
+    drv_error = None
+except Exception as e:
+    drv = pd.DataFrame()
+    drv_error = e
+
+try:
+    verb = cargar_verbatims()
+    verb_error = None
+except Exception as e:
+    verb = pd.DataFrame()
+    verb_error = e
 
 # =====================================================
 # FILTROS
 # =====================================================
 
+sucursal = "TODAS"
+df_sucursal = None
+sucursal_error = None
+
 with st.sidebar:
-    st.markdown(f"<h3 style='color:{AZUL};margin-bottom:0'>Filtros</h3>", unsafe_allow_html=True)
+    st.markdown(
+        f"<h3 style='color:{AZUL};margin-bottom:0'>{texto_icono('filtros', 'Filtros', size=18)}</h3>",
+        unsafe_allow_html=True,
+    )
     st.caption("Aplican a todo el tablero")
 
-    lineas = ["TODAS"] + sorted(df["linea"].dropna().unique().tolist())
-    tipos = ["TODOS"] + sorted(df["tipo_encuesta"].dropna().unique().tolist())
-    periodos = sorted(df["anio_mes"].dropna().unique().tolist(), reverse=True)
+    lineas = ["TODAS"] + sorted(df_base["linea"].dropna().unique().tolist())
+    tipos = ["TODOS"] + sorted(df_base["tipo_encuesta"].dropna().unique().tolist())
+    periodos = sorted(df_base["anio_mes"].dropna().unique().tolist(), reverse=True)
+    if not periodos:
+        st.error("No hay períodos disponibles en el resumen base.")
+        st.stop()
 
     linea = st.selectbox("Línea", lineas, key="f_linea")
     tipo = st.selectbox("Tipo de encuesta", tipos, key="f_tipo")
     periodo = st.selectbox("Período", periodos, key="f_periodo")
 
-    if COL_SUC:
-        base_suc = df if linea == "TODAS" else df[df["linea"] == linea]
-        opciones_suc = sorted(base_suc[COL_SUC].dropna().astype(str).unique().tolist())
-        sucursales = st.multiselect(
-            f"Sucursal ({COL_SUC})", opciones_suc,
-            help="Vacío = todas las sucursales", key="f_suc",
-        )
-    else:
-        sucursales = []
-        st.caption("ℹ️ El origen no expone `cod_suc`; filtro de sucursal deshabilitado.")
+    try:
+        df_sucursal = cargar_resumen_sucursal()
+        col_suc_selector = primera_col(df_sucursal, COLS_SUCURSAL)
+        if col_suc_selector:
+            opciones_suc = ["TODAS"] + sorted(
+                df_sucursal[col_suc_selector].dropna().astype(str).unique().tolist()
+            )
+            sucursal = st.selectbox("Sucursal", opciones_suc, key="f_suc")
+        else:
+            st.caption("El origen no expone una columna de sucursal utilizable.")
+    except Exception as e:
+        sucursal_error = e
+        st.caption("No fue posible cargar el filtro de sucursal desde `resumen_por_sucursal()`.")
+        st.caption(str(e))
 
     st.divider()
-    if st.button("↺ Limpiar filtros", use_container_width=True):
+    if st.button("Limpiar filtros", use_container_width=True):
         st.session_state.update(f_linea="TODAS", f_tipo="TODOS",
-                                f_periodo=periodos[0], f_suc=[])
+                                f_periodo=periodos[0], f_suc="TODAS")
         st.session_state.pop("verb_nlp", None)
         st.rerun()
-    if st.button("🔄 Recargar datos", use_container_width=True):
+    if st.button("Recargar datos", use_container_width=True):
         st.cache_data.clear()
         st.session_state.pop("verb_nlp", None)
         st.rerun()
@@ -343,12 +408,11 @@ with st.sidebar:
         "INS · Alto ≥9 · Medio 7,1–8,9 · Bajo <7  \n"
         "CES · Bajo esfuerzo <2,5 · Alto >3,5"
     )
-    st.caption("🔑 LLM " + ("activo" if os.getenv("HF_TOKEN") else "en modo analítico (sin HF_TOKEN)"))
+    st.caption("LLM " + ("activo" if os.getenv("HF_TOKEN") else "en modo analítico (sin HF_TOKEN)"))
 
     st.divider()
-    with st.expander("🔧 Diagnóstico", expanded=False):
+    with st.expander("Diagnóstico", expanded=False):
         if st.button("Probar tablas Gold", use_container_width=True, key="btn_diag"):
-            from utils.consultas import diagnostico
             with st.spinner("Verificando tablas…"):
                 try:
                     diag = diagnostico()
@@ -368,6 +432,10 @@ with st.sidebar:
                     st.error(f"Error al conectar con IA: {_e}")
 
 
+df = df_sucursal if sucursal != "TODAS" and df_sucursal is not None and not df_sucursal.empty else df_base
+COL_SUC = primera_col(df, COLS_SUCURSAL)
+
+
 def aplicar_filtros(d, con_periodo=True, periodo_valor=None):
     if d is None or d.empty:
         return d
@@ -378,10 +446,10 @@ def aplicar_filtros(d, con_periodo=True, periodo_valor=None):
         out = out[out["tipo_encuesta"] == tipo]
     if con_periodo and "anio_mes" in out.columns:
         out = out[out["anio_mes"] == (periodo_valor or periodo)]
-    if sucursales:
+    if sucursal != "TODAS":
         col = primera_col(out, COLS_SUCURSAL)
         if col:
-            out = out[out[col].astype(str).isin(sucursales)]
+            out = out[out[col].astype(str) == sucursal]
     return out
 
 
@@ -418,13 +486,13 @@ if linea != "TODAS":
     scope.append(linea)
 if tipo != "TODOS":
     scope.append(tipo)
-if sucursales:
-    scope.append(f"{len(sucursales)} sucursal(es)")
+if sucursal != "TODAS":
+    scope.append(f"Sucursal {sucursal}")
 scope_txt = " · ".join(scope) if scope else "Todas las líneas y encuestas"
 
 st.markdown(
     f"<div class='hero'>"
-    f"<h1>📊 Centro de Experiencia CX</h1>"
+    f"<h1>{texto_icono('dashboard', 'Centro de Experiencia CX', size=28, color='#FFFFFF')}</h1>"
     f"<div class='sub'>Seguros del Estado · {scope_txt} · Período {periodo}</div>"
     f"<div class='big'>{total_resp:,.0f} respuestas analizadas en el período</div>"
     f"</div>",
@@ -432,7 +500,10 @@ st.markdown(
 )
 
 if dfa.empty:
-    sin_datos("No hay registros para esta combinación de filtros. Ajusta la selección en la barra lateral.")
+    detalle = "La combinación existe en el histórico, pero no devolvió filas en el período seleccionado."
+    if sucursal_error and sucursal != "TODAS":
+        detalle += f" Además, el filtro de sucursal no pudo activarse: {sucursal_error}"
+    mensaje_vacio("Resumen", len(df), len(dfa), detalle)
     st.stop()
 
 # =====================================================
@@ -445,19 +516,19 @@ et_ces, col_ces = semaforo("CES", ces)
 
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
-    card("🎯 NPS", fmt(nps_real), delta(nps_real, nps_prev),
-         f"<span class='badge' style='background:{col_nps}'>{et_nps}</span>", col_nps)
+    card("NPS", fmt(nps_real), delta(nps_real, nps_prev),
+         f"<span class='badge' style='background:{col_nps}'>{et_nps}</span>", col_nps, icon_name="nps")
 with c2:
-    card("😊 INS", fmt(ins, 2), delta(ins, ins_prev),
-         f"<span class='badge' style='background:{col_ins}'>{et_ins}</span>", col_ins)
+    card("INS", fmt(ins, 2), delta(ins, ins_prev),
+         f"<span class='badge' style='background:{col_ins}'>{et_ins}</span>", col_ins, icon_name="ins")
 with c3:
-    card("⚡ CES", fmt(ces, 2), delta(ces, ces_prev),
-         f"<span class='badge' style='background:{col_ces}'>{et_ces}</span>", col_ces)
+    card("CES", fmt(ces, 2), delta(ces, ces_prev),
+         f"<span class='badge' style='background:{col_ces}'>{et_ces}</span>", col_ces, icon_name="termometro")
 with c4:
-    card("📨 Respuestas", f"{total_resp:,.0f}", delta(total_resp, total_prev),
-         "Encuestas completadas", AZUL_CLARO)
+    card("Respuestas", f"{total_resp:,.0f}", delta(total_resp, total_prev),
+         "Encuestas completadas", AZUL_CLARO, icon_name="respuestas")
 with c5:
-    card("💬 Verbatims", f"{len(verb_f):,.0f}", None, "Comentarios abiertos", NARANJA, "")
+    card("Verbatims", f"{len(verb_f):,.0f}", None, "Comentarios abiertos", NARANJA, "", icon_name="verbatims")
 
 # =====================================================
 # GAUGES
@@ -478,7 +549,7 @@ with g3:
 col_ev, col_dist = st.columns([1.35, 1])
 
 with col_ev:
-    st.markdown("<div class='section'>📈 Evolución</div>", unsafe_allow_html=True)
+    titulo_seccion("evolucion", "Evolución")
     if dfh.empty:
         sin_datos()
     else:
@@ -517,10 +588,10 @@ with col_ev:
         st.plotly_chart(fig, use_container_width=True)
 
 with col_dist:
-    st.markdown("<div class='section'>🧩 Composición NPS</div>", unsafe_allow_html=True)
-    cols_nps = [c for c in ("promotores", "pasivos", "detractores") if c in dfa.columns]
+    titulo_seccion("dashboard", "Composición NPS")
+    cols_nps = [c for c in ("promotores", "neutros", "detractores") if c in dfa.columns]
     if not cols_nps:
-        sin_datos("El origen no expone promotores/pasivos/detractores.")
+        sin_datos("El origen no expone promotores/neutros/detractores.")
     else:
         dist = dfa.groupby("linea", as_index=False)[cols_nps].sum()
         tot = dist[cols_nps].sum(axis=1).replace(0, pd.NA)
@@ -530,7 +601,7 @@ with col_dist:
                           var_name="Segmento", value_name="Porcentaje")
         fig = px.bar(
             largo, x="Porcentaje", y="linea", color="Segmento", orientation="h",
-            color_discrete_map={"promotores": VERDE, "pasivos": AMARILLO, "detractores": ROJO},
+            color_discrete_map={"promotores": VERDE, "neutros": AMARILLO, "detractores": ROJO},
             text=largo["Porcentaje"].map(lambda v: f"{v:.0f}%" if pd.notna(v) else ""),
         )
         fig.update_layout(height=380, margin=dict(l=10, r=10, t=30, b=10),
@@ -547,7 +618,7 @@ with col_dist:
 col_r, col_h = st.columns(2)
 
 with col_r:
-    st.markdown("<div class='section'>📍 Comparativo por línea</div>", unsafe_allow_html=True)
+    titulo_seccion("radar", "Comparativo por línea")
     radar = dfa.groupby("linea", as_index=False)["avg_ins"].mean().dropna()
     if radar.empty:
         sin_datos()
@@ -561,7 +632,7 @@ with col_r:
         st.plotly_chart(fig, use_container_width=True)
 
 with col_h:
-    st.markdown("<div class='section'>🌡️ INS por línea y tipo</div>", unsafe_allow_html=True)
+    titulo_seccion("termometro", "INS por línea y tipo")
     if {"linea", "tipo_encuesta", "avg_ins"}.issubset(dfa.columns):
         piv = dfa.pivot_table(index="linea", columns="tipo_encuesta",
                               values="avg_ins", aggfunc="mean")
@@ -581,154 +652,186 @@ with col_h:
 # DRIVERS
 # =====================================================
 
-st.markdown("<div class='section'>🔥 Drivers de experiencia</div>", unsafe_allow_html=True)
+titulo_seccion("drivers", "Drivers de experiencia")
 
-if drv_f.empty or "categoria" not in drv_f.columns:
-    sin_datos("No hay drivers para los filtros seleccionados.")
+if drv_error:
+    st.error(f"La consulta de drivers falló: {drv_error}")
+elif drv_f.empty or "categoria" not in drv_f.columns:
+    mensaje_vacio("Drivers", len(drv), len(drv_f), "Verifica el período y el tipo de encuesta seleccionados.")
 else:
-    col_impacto = primera_col(drv_f, ("avg_ins", "avg_nps_score", "impacto"))
-    if col_impacto:
-        rank = drv_f.groupby("categoria", as_index=False).agg(
-            menciones=("categoria", "size"), impacto=(col_impacto, "mean"))
-    else:
-        rank = drv_f.groupby("categoria", as_index=False).agg(menciones=("categoria", "size"))
-    rank["% del total"] = (rank["menciones"] / rank["menciones"].sum() * 100).round(1)
-
-    t1, t2 = st.tabs(["🎯 Matriz de priorización", "📊 Pareto"])
-
-    with t1:
-        if not col_impacto:
-            sin_datos("Falta una columna de impacto (avg_ins / avg_nps_score) en drivers().")
+    try:
+        col_impacto = primera_col(drv_f, ("avg_ins", "avg_nps_score", "impacto"))
+        if col_impacto:
+            rank = drv_f.groupby("categoria", as_index=False).agg(
+                menciones=("categoria", "size"), impacto=(col_impacto, "mean"))
         else:
-            mx, my = rank["menciones"].median(), rank["impacto"].median()
-            fig = px.scatter(rank, x="menciones", y="impacto", size="menciones",
-                             text="categoria", color="impacto",
-                             color_continuous_scale=[[0, ROJO], [.5, AMARILLO], [1, VERDE]],
-                             size_max=55)
-            fig.update_traces(textposition="top center", textfont_size=11)
-            fig.add_vline(x=mx, line_dash="dot", line_color=GRIS)
-            fig.add_hline(y=my, line_dash="dot", line_color=GRIS)
-            fig.add_annotation(x=rank["menciones"].max(), y=rank["impacto"].min(),
-                               text="<b>ATACAR YA</b>", showarrow=False,
-                               font=dict(color=ROJO, size=13), bgcolor="rgba(214,64,69,.12)")
-            fig.add_annotation(x=rank["menciones"].max(), y=rank["impacto"].max(),
-                               text="<b>MANTENER</b>", showarrow=False,
-                               font=dict(color=VERDE, size=13), bgcolor="rgba(0,166,81,.12)")
-            fig.update_layout(height=460, margin=dict(l=10, r=10, t=30, b=10),
-                              plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
-                              xaxis_title="Volumen de menciones →",
-                              yaxis_title="← Desempeño (peor abajo)",
-                              coloraxis_showscale=False)
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption("Prioriza el cuadrante inferior derecho: alto volumen y bajo desempeño.")
+            rank = drv_f.groupby("categoria", as_index=False).agg(menciones=("categoria", "size"))
+        rank["% del total"] = (rank["menciones"] / rank["menciones"].sum() * 100).round(1)
 
-    with t2:
-        par = rank.sort_values("menciones", ascending=False).copy()
-        par["acumulado"] = (par["menciones"].cumsum() / par["menciones"].sum() * 100).round(1)
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(go.Bar(x=par["categoria"], y=par["menciones"], name="Menciones",
-                             marker_color=AZUL), secondary_y=False)
-        fig.add_trace(go.Scatter(x=par["categoria"], y=par["acumulado"], name="% acumulado",
-                                 mode="lines+markers", line=dict(color=NARANJA, width=3)),
-                      secondary_y=True)
-        fig.add_hline(y=80, line_dash="dash", line_color=ROJO, opacity=.6, secondary_y=True)
-        fig.update_yaxes(title_text="Menciones", secondary_y=False)
-        fig.update_yaxes(title_text="% acumulado", range=[0, 105], secondary_y=True, showgrid=False)
-        fig.update_layout(height=460, margin=dict(l=10, r=10, t=30, b=10),
-                          plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
-                          hovermode="x unified",
-                          legend=dict(orientation="h", y=1.12, x=0))
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("Regla 80/20: las categorías a la izquierda de la línea roja explican el 80% de las menciones.")
+        if col_impacto:
+            t1, t2 = st.tabs(["Matriz de priorización", "Pareto"])
+        else:
+            t1, t2 = st.tabs(["Pareto", "Detalle"])
+
+        with t1:
+            if col_impacto:
+                mx, my = rank["menciones"].median(), rank["impacto"].median()
+                fig = px.scatter(rank, x="menciones", y="impacto", size="menciones",
+                                 text="categoria", color="impacto",
+                                 color_continuous_scale=[[0, ROJO], [.5, AMARILLO], [1, VERDE]],
+                                 size_max=55)
+                fig.update_traces(textposition="top center", textfont_size=11)
+                fig.add_vline(x=mx, line_dash="dot", line_color=GRIS)
+                fig.add_hline(y=my, line_dash="dot", line_color=GRIS)
+                fig.add_annotation(x=rank["menciones"].max(), y=rank["impacto"].min(),
+                                   text="<b>ATACAR YA</b>", showarrow=False,
+                                   font=dict(color=ROJO, size=13), bgcolor="rgba(214,64,69,.12)")
+                fig.add_annotation(x=rank["menciones"].max(), y=rank["impacto"].max(),
+                                   text="<b>MANTENER</b>", showarrow=False,
+                                   font=dict(color=VERDE, size=13), bgcolor="rgba(0,166,81,.12)")
+                fig.update_layout(height=460, margin=dict(l=10, r=10, t=30, b=10),
+                                  plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
+                                  xaxis_title="Volumen de menciones →",
+                                  yaxis_title="← Desempeño (peor abajo)",
+                                  coloraxis_showscale=False)
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption("Prioriza el cuadrante inferior derecho: alto volumen y bajo desempeño.")
+            else:
+                par = rank.sort_values("menciones", ascending=False).copy()
+                par["acumulado"] = (par["menciones"].cumsum() / par["menciones"].sum() * 100).round(1)
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+                fig.add_trace(go.Bar(x=par["categoria"], y=par["menciones"], name="Menciones",
+                                     marker_color=AZUL), secondary_y=False)
+                fig.add_trace(go.Scatter(x=par["categoria"], y=par["acumulado"], name="% acumulado",
+                                         mode="lines+markers", line=dict(color=NARANJA, width=3)),
+                              secondary_y=True)
+                fig.add_hline(y=80, line_dash="dash", line_color=ROJO, opacity=.6, secondary_y=True)
+                fig.update_yaxes(title_text="Menciones", secondary_y=False)
+                fig.update_yaxes(title_text="% acumulado", range=[0, 105], secondary_y=True, showgrid=False)
+                fig.update_layout(height=460, margin=dict(l=10, r=10, t=30, b=10),
+                                  plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
+                                  hovermode="x unified",
+                                  legend=dict(orientation="h", y=1.12, x=0))
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption("No se encontró una métrica de impacto; se muestra el Pareto de menciones.")
+
+        with t2:
+            if col_impacto:
+                par = rank.sort_values("menciones", ascending=False).copy()
+                par["acumulado"] = (par["menciones"].cumsum() / par["menciones"].sum() * 100).round(1)
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+                fig.add_trace(go.Bar(x=par["categoria"], y=par["menciones"], name="Menciones",
+                                     marker_color=AZUL), secondary_y=False)
+                fig.add_trace(go.Scatter(x=par["categoria"], y=par["acumulado"], name="% acumulado",
+                                         mode="lines+markers", line=dict(color=NARANJA, width=3)),
+                              secondary_y=True)
+                fig.add_hline(y=80, line_dash="dash", line_color=ROJO, opacity=.6, secondary_y=True)
+                fig.update_yaxes(title_text="Menciones", secondary_y=False)
+                fig.update_yaxes(title_text="% acumulado", range=[0, 105], secondary_y=True, showgrid=False)
+                fig.update_layout(height=460, margin=dict(l=10, r=10, t=30, b=10),
+                                  plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
+                                  hovermode="x unified",
+                                  legend=dict(orientation="h", y=1.12, x=0))
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption("Regla 80/20: las categorías a la izquierda de la línea roja explican el 80% de las menciones.")
+            else:
+                st.dataframe(rank.sort_values("menciones", ascending=False), use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.error(f"No fue posible renderizar la sección de drivers: {e}")
 
 # =====================================================
 # SENTIMIENTO (BERT)
 # =====================================================
 
-st.markdown("<div class='section'>🧠 Análisis de sentimiento (BERT)</div>", unsafe_allow_html=True)
+titulo_seccion("cerebro", "Análisis de sentimiento (BERT)")
 
-if verb_f.empty:
-    sin_datos("No hay comentarios para analizar.")
+if verb_error:
+    st.error(f"La consulta de verbatims falló: {verb_error}")
+elif verb_f.empty:
+    mensaje_vacio("BERT", len(verb), len(verb_f), "No hay comentarios disponibles para enviar al modelo.")
 else:
-    s1, s2, s3 = st.columns([1, 1, 1])
-    muestra = s1.slider("Comentarios a analizar", 50, 1000, 300, step=50,
-                        help="El modelo corre en CPU; más comentarios = más tiempo.")
-    con_sub = s2.toggle("Incluir sub-sentimiento (zero-shot)", value=True)
-    s3.write("")
-    ejecutar = s3.button("▶️ Ejecutar análisis", type="primary", use_container_width=True)
+    try:
+        s1, s2, s3 = st.columns([1, 1, 1])
+        muestra = s1.slider("Comentarios a analizar", 50, 1000, 300, step=50,
+                            help="El modelo corre en CPU; más comentarios = más tiempo.")
+        con_sub = s2.toggle("Incluir sub-sentimiento (zero-shot)", value=True)
+        s3.write("")
+        ejecutar = s3.button("Ejecutar análisis", type="primary", use_container_width=True)
 
-    if ejecutar:
-        try:
-            st.session_state["verb_nlp"] = nlp.enriquecer(verb_f, muestra=muestra, con_sub=con_sub)
-        except Exception as e:
-            st.error("Falló el análisis de sentimiento.")
-            st.exception(e)
+        if ejecutar:
+            try:
+                st.session_state["verb_nlp"] = nlp.enriquecer(verb_f, muestra=muestra, con_sub=con_sub)
+            except Exception as e:
+                st.error("Falló el análisis de sentimiento.")
+                st.exception(e)
 
-    vnlp = st.session_state.get("verb_nlp")
+        vnlp = st.session_state.get("verb_nlp")
 
-    if vnlp is None:
-        st.info("Pulsa **Ejecutar análisis** para clasificar los comentarios.")
-    elif "polaridad" not in vnlp.columns:
-        sin_datos("No se detectó una columna de texto en los verbatims.")
-    else:
-        dist = vnlp["polaridad"].value_counts()
-        neg_pct = dist.get("Negativo", 0) / max(len(vnlp), 1) * 100
-
-        k1, k2, k3, k4 = st.columns(4)
-        with k1: card("😊 Positivos", f"{dist.get('Positivo', 0):,.0f}", None, "Comentarios", VERDE, "")
-        with k2: card("😐 Neutros", f"{dist.get('Neutro', 0):,.0f}", None, "Comentarios", AMARILLO, "")
-        with k3: card("😠 Negativos", f"{dist.get('Negativo', 0):,.0f}", None, "Comentarios", ROJO, "")
-        with k4: card("⚠️ Tasa negativa", f"{neg_pct:.1f}%", None, "Del total analizado", ROJO, "")
-
-        n1, n2 = st.columns([1, 1.4])
-        with n1:
-            fig = px.pie(values=dist.values, names=dist.index, hole=.58, color=dist.index,
-                         color_discrete_map={"Positivo": VERDE, "Neutro": AMARILLO, "Negativo": ROJO})
-            fig.update_traces(textinfo="percent+label")
-            fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10),
-                              paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-        with n2:
-            if "subsentimiento" in vnlp.columns and vnlp["subsentimiento"].notna().any():
-                sun = (vnlp.dropna(subset=["subsentimiento"])
-                       .groupby(["polaridad", "subsentimiento"], as_index=False).size())
-                fig = px.sunburst(sun, path=["polaridad", "subsentimiento"], values="size",
-                                  color="polaridad",
-                                  color_discrete_map={"Positivo": VERDE, "Neutro": AMARILLO,
-                                                      "Negativo": ROJO, "(?)": GRIS})
-                fig.update_traces(insidetextorientation="radial")
-                fig.update_layout(height=360, margin=dict(l=0, r=0, t=30, b=0),
-                                  paper_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.caption("Activa el sub-sentimiento para ver el desglose.")
-
-        opciones_dim = [c for c in (COLS_INTERMEDIARIO + COLS_SUCURSAL + ("linea", "tipo_encuesta"))
-                        if c in vnlp.columns]
-        if opciones_dim:
-            dim_col = st.selectbox("Agrupar comentarios negativos por", opciones_dim, key="f_dim_neg")
-            rk = ranking_negativos(vnlp, dim_col, top=15)
-            if rk.empty:
-                sin_datos("Volumen insuficiente para el ranking (mínimo 5 comentarios por grupo).")
-            else:
-                fig = px.bar(rk.sort_values("negativos"), x="negativos", y=dim_col,
-                             orientation="h", text="% negativos", color="% negativos",
-                             color_continuous_scale=[[0, AMARILLO], [1, ROJO]])
-                fig.update_traces(texttemplate="%{text}%", textposition="outside")
-                fig.update_layout(height=460, margin=dict(l=10, r=40, t=20, b=10),
-                                  plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
-                                  xaxis_title="Comentarios negativos", yaxis_title="",
-                                  coloraxis_showscale=False)
-                st.plotly_chart(fig, use_container_width=True)
-                st.dataframe(rk, use_container_width=True, hide_index=True)
+        if vnlp is None:
+            st.info("Pulsa **Ejecutar análisis** para clasificar los comentarios.")
+        elif "polaridad" not in vnlp.columns:
+            mensaje_vacio("BERT", len(verb_f), 0, "No se detectó una columna de texto en los verbatims filtrados.")
         else:
-            st.caption("ℹ️ Los verbatims no traen columnas de intermediario ni sucursal.")
+            dist = vnlp["polaridad"].value_counts()
+            neg_pct = dist.get("Negativo", 0) / max(len(vnlp), 1) * 100
+
+            k1, k2, k3, k4 = st.columns(4)
+            with k1: card("Positivos", f"{dist.get('Positivo', 0):,.0f}", None, "Comentarios", VERDE, "", icon_name="check")
+            with k2: card("Neutros", f"{dist.get('Neutro', 0):,.0f}", None, "Comentarios", AMARILLO, "", icon_name="comentarios")
+            with k3: card("Negativos", f"{dist.get('Negativo', 0):,.0f}", None, "Comentarios", ROJO, "", icon_name="alerta")
+            with k4: card("Tasa negativa", f"{neg_pct:.1f}%", None, "Del total analizado", ROJO, "", icon_name="termometro")
+
+            n1, n2 = st.columns([1, 1.4])
+            with n1:
+                fig = px.pie(values=dist.values, names=dist.index, hole=.58, color=dist.index,
+                             color_discrete_map={"Positivo": VERDE, "Neutro": AMARILLO, "Negativo": ROJO})
+                fig.update_traces(textinfo="percent+label")
+                fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10),
+                                  paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            with n2:
+                if "subsentimiento" in vnlp.columns and vnlp["subsentimiento"].notna().any():
+                    sun = (vnlp.dropna(subset=["subsentimiento"])
+                           .groupby(["polaridad", "subsentimiento"], as_index=False).size())
+                    fig = px.sunburst(sun, path=["polaridad", "subsentimiento"], values="size",
+                                      color="polaridad",
+                                      color_discrete_map={"Positivo": VERDE, "Neutro": AMARILLO,
+                                                          "Negativo": ROJO, "(?)": GRIS})
+                    fig.update_traces(insidetextorientation="radial")
+                    fig.update_layout(height=360, margin=dict(l=0, r=0, t=30, b=0),
+                                      paper_bgcolor="rgba(0,0,0,0)")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.caption("Activa el sub-sentimiento para ver el desglose.")
+
+            opciones_dim = [c for c in (COLS_INTERMEDIARIO + COLS_SUCURSAL + ("linea", "tipo_encuesta"))
+                            if c in vnlp.columns]
+            if opciones_dim:
+                dim_col = st.selectbox("Agrupar comentarios negativos por", opciones_dim, key="f_dim_neg")
+                rk = ranking_negativos(vnlp, dim_col, top=15)
+                if rk.empty:
+                    mensaje_vacio("Ranking de negativos", len(vnlp), 0, "Se requieren al menos 5 comentarios por grupo.")
+                else:
+                    fig = px.bar(rk.sort_values("negativos"), x="negativos", y=dim_col,
+                                 orientation="h", text="% negativos", color="% negativos",
+                                 color_continuous_scale=[[0, AMARILLO], [1, ROJO]])
+                    fig.update_traces(texttemplate="%{text}%", textposition="outside")
+                    fig.update_layout(height=460, margin=dict(l=10, r=40, t=20, b=10),
+                                      plot_bgcolor="white", paper_bgcolor="rgba(0,0,0,0)",
+                                      xaxis_title="Comentarios negativos", yaxis_title="",
+                                      coloraxis_showscale=False)
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.dataframe(rk, use_container_width=True, hide_index=True)
+            else:
+                st.caption("Los verbatims no traen columnas de intermediario ni sucursal.")
+    except Exception as e:
+        st.error(f"No fue posible renderizar la sección BERT: {e}")
 
 # =====================================================
 # INSIGHTS
 # =====================================================
 
-st.markdown("<div class='section'>🧠 Insights automáticos</div>", unsafe_allow_html=True)
+titulo_seccion("cerebro", "Insights automáticos")
 
 insights = []
 serie_ins = dfa.groupby("linea")["avg_ins"].mean().dropna()
@@ -752,53 +855,58 @@ if ces is not None and ces > BANDAS["CES"]["alto"]:
 insights.append(("", f"Se analizaron <b>{total_resp:,.0f}</b> respuestas y <b>{len(verb_f):,.0f}</b> verbatims."))
 
 for clase, txt in insights:
-    icono = {"bad": "🚨", "warn": "⚠️", "": "✅"}[clase]
-    st.markdown(f"<div class='insight {clase}'>{icono} {txt}</div>", unsafe_allow_html=True)
+    nombre_icono = {"bad": "alerta", "warn": "alerta", "": "check"}[clase]
+    st.markdown(f"<div class='insight {clase}'>{icono(nombre_icono, size=16)} {txt}</div>", unsafe_allow_html=True)
 
 # =====================================================
 # VERBATIMS
 # =====================================================
 
-st.markdown("<div class='section'>💬 Verbatims</div>", unsafe_allow_html=True)
+titulo_seccion("verbatims", "Verbatims")
 
-if verb_f.empty:
-    sin_datos("No hay comentarios para los filtros seleccionados.")
+if verb_error:
+    st.error(f"La consulta de verbatims falló: {verb_error}")
+elif verb_f.empty:
+    mensaje_vacio("Verbatims", len(verb), len(verb_f), "Ajusta el período o el tipo de encuesta para ampliar la muestra.")
 else:
-    vnlp = st.session_state.get("verb_nlp")
-    fuente_tabla = vnlp if vnlp is not None and "polaridad" in getattr(vnlp, "columns", []) else verb_f
+    try:
+        vnlp = st.session_state.get("verb_nlp")
+        fuente_tabla = vnlp if vnlp is not None and "polaridad" in getattr(vnlp, "columns", []) else verb_f
 
-    v1, v2, v3 = st.columns([2.5, 1, 1])
-    busqueda = v1.text_input("Buscar en los comentarios", placeholder="Ej.: demora, atención, portal…")
-    if "polaridad" in fuente_tabla.columns:
-        pol = v2.multiselect("Polaridad", ["Positivo", "Neutro", "Negativo"], key="f_pol")
-    else:
-        pol = []
-        v2.caption("")
-    limite = v3.number_input("Filas", 50, 5000, 500, step=50)
+        v1, v2, v3 = st.columns([2.5, 1, 1])
+        busqueda = v1.text_input("Buscar en los comentarios", placeholder="Ej.: demora, atención, portal…")
+        if "polaridad" in fuente_tabla.columns:
+            pol = v2.multiselect("Polaridad", ["Positivo", "Neutro", "Negativo"], key="f_pol")
+        else:
+            pol = []
+            v2.caption("")
+        limite = v3.number_input("Filas", 50, 5000, 500, step=50)
 
-    vista = fuente_tabla
-    if pol:
-        vista = vista[vista["polaridad"].isin(pol)]
-    if busqueda:
-        cols_txt = vista.select_dtypes(include="object").columns
-        mask = pd.Series(False, index=vista.index)
-        for c in cols_txt:
-            mask |= vista[c].astype(str).str.contains(busqueda, case=False, na=False)
-        vista = vista[mask]
+        vista = fuente_tabla
+        if pol:
+            vista = vista[vista["polaridad"].isin(pol)]
+        if busqueda:
+            cols_txt = vista.select_dtypes(include="object").columns
+            mask = pd.Series(False, index=vista.index)
+            for c in cols_txt:
+                mask |= vista[c].astype(str).str.contains(busqueda, case=False, na=False)
+            vista = vista[mask]
 
-    st.caption(f"{len(vista):,.0f} comentarios coinciden con los criterios.")
-    st.dataframe(vista.head(int(limite)), use_container_width=True, height=420)
+        st.caption(f"{len(vista):,.0f} comentarios coinciden con los criterios.")
+        st.dataframe(vista.head(int(limite)), use_container_width=True, height=420)
 
-    buff = io.StringIO()
-    vista.to_csv(buff, index=False)
-    st.download_button("⬇️ Descargar CSV", buff.getvalue(),
-                       file_name=f"verbatims_{periodo}_{linea}_{tipo}.csv", mime="text/csv")
+        buff = io.StringIO()
+        vista.to_csv(buff, index=False)
+        st.download_button("Descargar CSV", buff.getvalue(),
+                           file_name=f"verbatims_{periodo}_{linea}_{tipo}.csv", mime="text/csv")
+    except Exception as e:
+        st.error(f"No fue posible renderizar la sección de verbatims: {e}")
 
 # =====================================================
 # COPILOTO
 # =====================================================
 
-st.markdown("<div class='section'>🤖 Copiloto CX</div>", unsafe_allow_html=True)
+titulo_seccion("bot", "Copiloto CX")
 
 cp1, cp2 = st.columns([2, 1])
 
@@ -823,21 +931,21 @@ with cp1:
                     "nps": nps_real, "ins": ins, "ces": ces,
                     "respuestas": total_resp, "verbatims": len(verb_f),
                     "filtros": f"{linea} · {tipo} · {periodo}"
-                    + (f" · sucursales: {', '.join(sucursales)}" if sucursales else ""),
+                    + (f" · sucursal: {sucursal}" if sucursal != "TODAS" else ""),
                 }
                 with st.spinner("Analizando…"):
                     texto, tabla = responder(pregunta, fuente, kpis)
 
                 # Markdown nativo: el LLM devuelve viñetas y negritas
                 with st.container(border=True):
-                    st.markdown("<div class='cx-answer'>🤖 Respuesta del copiloto</div>",
+                    st.markdown("<div class='cx-answer'>Respuesta del copiloto</div>",
                                 unsafe_allow_html=True)
                     st.markdown(texto)
                     if tabla is not None and not tabla.empty:
                         st.dataframe(tabla, use_container_width=True, hide_index=True)
                         b = io.StringIO()
                         tabla.to_csv(b, index=False)
-                        st.download_button("⬇️ Descargar este ranking", b.getvalue(),
+                        st.download_button("Descargar este ranking", b.getvalue(),
                                            file_name="ranking_negativos.csv", mime="text/csv")
 
 with cp2:

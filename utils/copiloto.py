@@ -149,4 +149,4 @@ def responder(pregunta: str, verb: pd.DataFrame, kpis: dict):
         )
         return resp.choices[0].message.content, tabla
     except Exception as e:
-        return f"⚠️ No fue posible consultar el modelo (`{MODELO_LLM}`): {e}", tabla
+        return f"No fue posible consultar el modelo (`{MODELO_LLM}`): {e}", tabla
