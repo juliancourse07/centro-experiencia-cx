@@ -34,6 +34,17 @@ T_DRIVERS = f"{CATALOGO}.{ESQUEMA}.gold_cx_drivers"
 T_VERBATIMS = f"{CATALOGO}.{ESQUEMA}.gold_cx_verbatims"
 
 TTL = 900  # 15 min
+EXPR_FECHA = """
+COALESCE(
+    TRY_TO_DATE(TRIM({col}), 'M/d/yy'),
+    TRY_TO_DATE(TRIM({col}), 'yyyy-MM-dd'),
+    TRY_CAST({col} AS DATE)
+)
+""".strip()
+
+
+def expr_fecha(columna: str = "fecha") -> str:
+    return EXPR_FECHA.format(col=columna)
 
 
 # =====================================================
@@ -118,10 +129,11 @@ def drivers() -> pd.DataFrame:
       metrica -> NPS | CES
     Eso habilita la matriz Dolor vs. Punto de contacto y el Pareto.
     """
+    fecha_expr = expr_fecha()
     return query(f"""
         SELECT
-            CAST(fecha AS DATE)                                AS fecha,
-            DATE_FORMAT(CAST(fecha AS DATE), 'yyyy-MM')        AS anio_mes,
+            {fecha_expr}                                       AS fecha,
+            DATE_FORMAT({fecha_expr}, 'yyyy-MM')               AS anio_mes,
             UPPER(TRIM(tipo_encuesta))                         AS tipo_encuesta,
             UPPER(TRIM(linea))                                 AS linea,
             UPPER(TRIM(tipo_driver))                           AS tipo_driver,
@@ -135,7 +147,7 @@ def drivers() -> pd.DataFrame:
         WHERE categoria IS NOT NULL
           AND TRIM(categoria) <> ''
           AND UPPER(TRIM(categoria)) NOT IN ('N/A', 'NA', 'NULL', 'NINGUNO', 'SIN DATO')
-          AND fecha IS NOT NULL
+          AND {fecha_expr} IS NOT NULL
     """)
 
 
@@ -155,10 +167,11 @@ def verbatims(limite: int = 20000) -> pd.DataFrame:
     `es_negativo` viene de tipo_comentario, ya etiquetado por la encuesta:
     el ranking funciona SIN ejecutar ningún modelo de IA.
     """
+    fecha_expr = expr_fecha()
     return query(f"""
         SELECT
-            CAST(fecha AS DATE)                          AS fecha,
-            DATE_FORMAT(CAST(fecha AS DATE), 'yyyy-MM')  AS anio_mes,
+            {fecha_expr}                                 AS fecha,
+            DATE_FORMAT({fecha_expr}, 'yyyy-MM')         AS anio_mes,
             UPPER(TRIM(tipo_encuesta))                   AS tipo_encuesta,
             UPPER(TRIM(linea))                           AS linea,
 
@@ -183,8 +196,8 @@ def verbatims(limite: int = 20000) -> pd.DataFrame:
         WHERE texto IS NOT NULL
           AND LENGTH(TRIM(texto)) > 3
           AND UPPER(TRIM(texto)) NOT IN ('N/A','NA','NINGUNO','NINGUNA','NO','SIN COMENTARIO','.','-')
-          AND fecha IS NOT NULL
-        ORDER BY fecha DESC
+          AND {fecha_expr} IS NOT NULL
+        ORDER BY {fecha_expr} DESC
         LIMIT {int(limite)}
     """)
 
@@ -219,8 +232,10 @@ def ranking_negativos_sql(dimension: str = "intermediario",
     filtros = ["texto IS NOT NULL", "LENGTH(TRIM(texto)) > 3"]
     if dimension == "intermediario":
         filtros.append("UPPER(TRIM(tipo_encuesta)) = 'INTERMEDIARIO'")
+    fecha_expr = expr_fecha()
+    filtros.append(f"{fecha_expr} IS NOT NULL")
     if anio_mes:
-        filtros.append(f"DATE_FORMAT(CAST(fecha AS DATE), 'yyyy-MM') = '{anio_mes}'")
+        filtros.append(f"DATE_FORMAT({fecha_expr}, 'yyyy-MM') = '{anio_mes}'")
     if linea and linea.upper() != "TODAS":
         filtros.append(f"UPPER(TRIM(linea)) = '{linea.upper()}'")
 
@@ -251,13 +266,37 @@ def ranking_negativos_sql(dimension: str = "intermediario",
 @st.cache_data(ttl=TTL, show_spinner=False)
 def diagnostico() -> pd.DataFrame:
     """Verifica que las 4 tablas Gold existan y tengan datos. Útil al desplegar."""
+    exprs_fecha = {
+        "gold_cx_kpis": expr_fecha(),
+        "gold_cx_resumen": "TRY_TO_DATE(CONCAT(TRIM(anio_mes), '-01'), 'yyyy-MM-dd')",
+        "gold_cx_drivers": expr_fecha(),
+        "gold_cx_verbatims": expr_fecha(),
+    }
     filas = []
     for nombre, tabla in [("gold_cx_kpis", T_KPIS), ("gold_cx_resumen", T_RESUMEN),
                           ("gold_cx_drivers", T_DRIVERS), ("gold_cx_verbatims", T_VERBATIMS)]:
         try:
-            r = query(f"SELECT COUNT(*) AS filas FROM {tabla}")
-            filas.append({"tabla": nombre, "estado": "✅ OK", "filas": int(r.iloc[0]["filas"])})
+            r = query(f"""
+                SELECT
+                    COUNT(*) AS filas,
+                    SUM(CASE WHEN {exprs_fecha[nombre]} IS NOT NULL THEN 1 ELSE 0 END) AS fecha_parseable,
+                    SUM(CASE WHEN {exprs_fecha[nombre]} IS NULL THEN 1 ELSE 0 END) AS fecha_no_parseable
+                FROM {tabla}
+            """)
+            filas.append({
+                "tabla": nombre,
+                "estado": "OK",
+                "filas": int(r.iloc[0]["filas"]),
+                "fecha_parseable": int(r.iloc[0]["fecha_parseable"]),
+                "fecha_no_parseable": int(r.iloc[0]["fecha_no_parseable"]),
+            })
         except Exception as e:
-            filas.append({"tabla": nombre, "estado": f"❌ {type(e).__name__}", "filas": 0,
-                          "detalle": str(e)[:200]})
+            filas.append({
+                "tabla": nombre,
+                "estado": type(e).__name__,
+                "filas": 0,
+                "fecha_parseable": 0,
+                "fecha_no_parseable": 0,
+                "detalle": str(e)[:200],
+            })
     return pd.DataFrame(filas)
