@@ -107,7 +107,7 @@ NUM_COLS = [
     "avg_ins",
     "avg_ces",
     "promotores",
-    "pasivos",
+    "neutros",
     "detractores",
 ]
 
@@ -344,6 +344,28 @@ with st.sidebar:
         "CES · Bajo esfuerzo <2,5 · Alto >3,5"
     )
     st.caption("🔑 LLM " + ("activo" if os.getenv("HF_TOKEN") else "en modo analítico (sin HF_TOKEN)"))
+
+    st.divider()
+    with st.expander("🔧 Diagnóstico", expanded=False):
+        if st.button("Probar tablas Gold", use_container_width=True, key="btn_diag"):
+            from utils.consultas import diagnostico
+            with st.spinner("Verificando tablas…"):
+                try:
+                    diag = diagnostico()
+                    st.dataframe(diag, use_container_width=True)
+                except Exception as _e:
+                    st.error(f"Error al verificar tablas: {_e}")
+        if st.button("Probar conexión IA", use_container_width=True, key="btn_ia"):
+            tok = os.getenv("HF_TOKEN")
+            if not tok:
+                st.warning("HF_TOKEN no configurado. El copiloto funciona en modo analítico.")
+            else:
+                from utils.copiloto import cliente_llm
+                try:
+                    cli = cliente_llm()
+                    st.success("Conexión con el modelo de IA establecida." if cli else "Sin cliente disponible.")
+                except Exception as _e:
+                    st.error(f"Error al conectar con IA: {_e}")
 
 
 def aplicar_filtros(d, con_periodo=True, periodo_valor=None):
