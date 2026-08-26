@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Entornos
+.venv/
+venv/
+.env
+.env.*
+
+# Modelos y cache de Hugging Face
+hf_cache/
+.cache/
+*.safetensors
+*.bin
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Sistema
+.DS_Store
+Thumbs.db
+*.log
+/tmp/
+
+# Datos locales (nunca versionar informacion de clientes)
+*.csv
+*.xlsx
+*.parquet
+data/
