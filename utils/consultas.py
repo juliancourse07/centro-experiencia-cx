@@ -25,8 +25,8 @@ from utils.warehouse import query  # conector OAuth existente
 # CONFIGURACIÓN DE TABLAS
 # =====================================================
 
-CATALOGO = os.getenv("CX_CATALOGO", "desarrollo_dmvicecomhechos")
-ESQUEMA = os.getenv("CX_ESQUEMA", "default")  # <-- VERIFICA ESTE VALOR
+CATALOGO = os.getenv("CX_CATALOGO", "hive_metastore")
+ESQUEMA = os.getenv("CX_ESQUEMA", "desarrollo_dmvicecomhechos")
 
 T_KPIS = f"{CATALOGO}.{ESQUEMA}.gold_cx_kpis"
 T_RESUMEN = f"{CATALOGO}.{ESQUEMA}.gold_cx_resumen"

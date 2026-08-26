@@ -6,3 +6,4 @@ torch>=2.2
 huggingface_hub>=0.24
 sentencepiece>=0.2
 protobuf>=4.25
+databricks-sdk>=0.20

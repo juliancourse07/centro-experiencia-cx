@@ -40,3 +40,9 @@ env:
     value: "true"
   - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
     value: "false"
+
+  # --- Catálogo y esquema de tablas Gold ---
+  - name: CX_CATALOGO
+    value: hive_metastore
+  - name: CX_ESQUEMA
+    value: desarrollo_dmvicecomhechos
