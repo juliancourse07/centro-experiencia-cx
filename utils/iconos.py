@@ -27,7 +27,7 @@ ICONOS = {
 
 
 def icono(nombre: str, size: int = 20, color: str = "currentColor") -> str:
-    svg = ICONOS[nombre]
+    svg = ICONOS.get(nombre) or ICONOS["alerta"]
     return svg.format(size=int(size), color=escape(color, quote=True))
 
 

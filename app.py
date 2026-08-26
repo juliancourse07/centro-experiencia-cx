@@ -777,7 +777,7 @@ else:
 
             k1, k2, k3, k4 = st.columns(4)
             with k1: card("Positivos", f"{dist.get('Positivo', 0):,.0f}", None, "Comentarios", VERDE, "", icon_name="check")
-            with k2: card("Neutros", f"{dist.get('Neutro', 0):,.0f}", None, "Comentarios", AMARILLO, "", icon_name="dashboard")
+            with k2: card("Neutros", f"{dist.get('Neutro', 0):,.0f}", None, "Comentarios", AMARILLO, "", icon_name="comentarios")
             with k3: card("Negativos", f"{dist.get('Negativo', 0):,.0f}", None, "Comentarios", ROJO, "", icon_name="alerta")
             with k4: card("Tasa negativa", f"{neg_pct:.1f}%", None, "Del total analizado", ROJO, "", icon_name="termometro")
 

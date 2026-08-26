@@ -131,9 +131,13 @@ def drivers() -> pd.DataFrame:
     """
     fecha_expr = expr_fecha()
     return query(f"""
+        WITH base AS (
+            SELECT *, {fecha_expr} AS fecha_parsed
+            FROM {T_DRIVERS}
+        )
         SELECT
-            {fecha_expr}                                       AS fecha,
-            DATE_FORMAT({fecha_expr}, 'yyyy-MM')               AS anio_mes,
+            fecha_parsed                                       AS fecha,
+            DATE_FORMAT(fecha_parsed, 'yyyy-MM')               AS anio_mes,
             UPPER(TRIM(tipo_encuesta))                         AS tipo_encuesta,
             UPPER(TRIM(linea))                                 AS linea,
             UPPER(TRIM(tipo_driver))                           AS tipo_driver,
@@ -143,11 +147,11 @@ def drivers() -> pd.DataFrame:
                  THEN 'DOLOR' ELSE 'PUNTO_CONTACTO' END        AS familia,
             CASE WHEN UPPER(tipo_driver) LIKE '%CES'
                  THEN 'CES' ELSE 'NPS' END                     AS metrica
-        FROM {T_DRIVERS}
+        FROM base
         WHERE categoria IS NOT NULL
           AND TRIM(categoria) <> ''
           AND UPPER(TRIM(categoria)) NOT IN ('N/A', 'NA', 'NULL', 'NINGUNO', 'SIN DATO')
-          AND {fecha_expr} IS NOT NULL
+          AND fecha_parsed IS NOT NULL
     """)
 
 
@@ -169,9 +173,13 @@ def verbatims(limite: int = 20000) -> pd.DataFrame:
     """
     fecha_expr = expr_fecha()
     return query(f"""
+        WITH base AS (
+            SELECT *, {fecha_expr} AS fecha_parsed
+            FROM {T_VERBATIMS}
+        )
         SELECT
-            {fecha_expr}                                 AS fecha,
-            DATE_FORMAT({fecha_expr}, 'yyyy-MM')         AS anio_mes,
+            fecha_parsed                                 AS fecha,
+            DATE_FORMAT(fecha_parsed, 'yyyy-MM')         AS anio_mes,
             UPPER(TRIM(tipo_encuesta))                   AS tipo_encuesta,
             UPPER(TRIM(linea))                           AS linea,
 
@@ -192,12 +200,12 @@ def verbatims(limite: int = 20000) -> pd.DataFrame:
 
             CASE WHEN UPPER(TRIM(tipo_comentario)) = 'DETRACTOR'
                  THEN 1 ELSE 0 END                       AS es_negativo
-        FROM {T_VERBATIMS}
+        FROM base
         WHERE texto IS NOT NULL
           AND LENGTH(TRIM(texto)) > 3
           AND UPPER(TRIM(texto)) NOT IN ('N/A','NA','NINGUNO','NINGUNA','NO','SIN COMENTARIO','.','-')
-          AND {fecha_expr} IS NOT NULL
-        ORDER BY {fecha_expr} DESC
+          AND fecha_parsed IS NOT NULL
+        ORDER BY fecha_parsed DESC
         LIMIT {int(limite)}
     """)
 
@@ -233,15 +241,19 @@ def ranking_negativos_sql(dimension: str = "intermediario",
     if dimension == "intermediario":
         filtros.append("UPPER(TRIM(tipo_encuesta)) = 'INTERMEDIARIO'")
     fecha_expr = expr_fecha()
-    filtros.append(f"{fecha_expr} IS NOT NULL")
+    filtros.append("fecha_parsed IS NOT NULL")
     if anio_mes:
-        filtros.append(f"DATE_FORMAT({fecha_expr}, 'yyyy-MM') = '{anio_mes}'")
+        filtros.append(f"DATE_FORMAT(fecha_parsed, 'yyyy-MM') = '{anio_mes}'")
     if linea and linea.upper() != "TODAS":
         filtros.append(f"UPPER(TRIM(linea)) = '{linea.upper()}'")
 
     where = " AND ".join(filtros)
 
     return query(f"""
+        WITH base AS (
+            SELECT *, {fecha_expr} AS fecha_parsed
+            FROM {T_VERBATIMS}
+        )
         SELECT
             {expr} AS {dimension},
             COUNT(*) AS total,
@@ -250,7 +262,7 @@ def ranking_negativos_sql(dimension: str = "intermediario",
                 100.0 * SUM(CASE WHEN UPPER(TRIM(tipo_comentario)) = 'DETRACTOR' THEN 1 ELSE 0 END)
                 / NULLIF(COUNT(*), 0), 1
             ) AS pct_negativos
-        FROM {T_VERBATIMS}
+        FROM base
         WHERE {where}
         GROUP BY {expr}
         HAVING COUNT(*) >= {int(minimo)}
@@ -277,11 +289,15 @@ def diagnostico() -> pd.DataFrame:
                           ("gold_cx_drivers", T_DRIVERS), ("gold_cx_verbatims", T_VERBATIMS)]:
         try:
             r = query(f"""
+                WITH base AS (
+                    SELECT {exprs_fecha[nombre]} AS fecha_parsed
+                    FROM {tabla}
+                )
                 SELECT
                     COUNT(*) AS filas,
-                    SUM(CASE WHEN {exprs_fecha[nombre]} IS NOT NULL THEN 1 ELSE 0 END) AS fecha_parseable,
-                    SUM(CASE WHEN {exprs_fecha[nombre]} IS NULL THEN 1 ELSE 0 END) AS fecha_no_parseable
-                FROM {tabla}
+                    SUM(CASE WHEN fecha_parsed IS NOT NULL THEN 1 ELSE 0 END) AS fecha_parseable,
+                    SUM(CASE WHEN fecha_parsed IS NULL THEN 1 ELSE 0 END) AS fecha_no_parseable
+                FROM base
             """)
             filas.append({
                 "tabla": nombre,

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 
-REPO = Path("/home/runner/work/centro-experiencia-cx/centro-experiencia-cx")
+REPO = Path(__file__).resolve().parent
 CONSULTAS = (REPO / "utils" / "consultas.py").read_text(encoding="utf-8")
 APP = (REPO / "app.py").read_text(encoding="utf-8")
 ICONOS = (REPO / "utils" / "iconos.py").read_text(encoding="utf-8")
@@ -17,9 +17,10 @@ class SourceRegressionTests(unittest.TestCase):
         self.assertIn("TRY_CAST({col} AS DATE)", CONSULTAS)
 
     def test_drivers_y_verbatims_usan_fecha_parseada(self):
-        self.assertIn("DATE_FORMAT({fecha_expr}, 'yyyy-MM')", CONSULTAS)
-        self.assertIn("AND {fecha_expr} IS NOT NULL", CONSULTAS)
-        self.assertIn("ORDER BY {fecha_expr} DESC", CONSULTAS)
+        self.assertIn("WITH base AS (", CONSULTAS)
+        self.assertIn("DATE_FORMAT(fecha_parsed, 'yyyy-MM')", CONSULTAS)
+        self.assertIn("AND fecha_parsed IS NOT NULL", CONSULTAS)
+        self.assertIn("ORDER BY fecha_parsed DESC", CONSULTAS)
         self.assertNotIn("DATE_FORMAT(CAST(fecha AS DATE), 'yyyy-MM')", CONSULTAS)
 
     def test_diagnostico_reporta_parseabilidad_de_fechas(self):
