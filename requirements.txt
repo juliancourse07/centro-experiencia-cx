@@ -7,3 +7,6 @@ huggingface_hub>=0.24
 sentencepiece>=0.2
 protobuf>=4.25
 databricks-sdk>=0.20
+XlsxWriter>=3.2
+openpyxl>=3.1
+kaleido>=0.2
