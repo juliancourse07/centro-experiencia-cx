@@ -14,16 +14,14 @@ Notas de diseño:
     para que el filtro de período del tablero funcione igual en todas las tablas.
 """
 
+from __future__ import annotations
+
 import os
 
 import pandas as pd
 import streamlit as st
 
-from utils.warehouse import query  # conector OAuth existente
-
-# =====================================================
-# CONFIGURACIÓN DE TABLAS
-# =====================================================
+from utils.warehouse import query
 
 CATALOGO = os.getenv("CX_CATALOGO", "hive_metastore")
 ESQUEMA = os.getenv("CX_ESQUEMA", "desarrollo_dmvicecomhechos")
@@ -33,7 +31,7 @@ T_RESUMEN = f"{CATALOGO}.{ESQUEMA}.gold_cx_resumen"
 T_DRIVERS = f"{CATALOGO}.{ESQUEMA}.gold_cx_drivers"
 T_VERBATIMS = f"{CATALOGO}.{ESQUEMA}.gold_cx_verbatims"
 
-TTL = 900  # 15 min
+TTL = 900
 EXPR_FECHA = """
 COALESCE(
     TRY_TO_DATE(TRIM({col}), 'M/d/yy'),
@@ -44,68 +42,64 @@ COALESCE(
 
 
 def expr_fecha(columna: str = "fecha") -> str:
+    """Devuelve la expresión SQL robusta para parsear fechas."""
     return EXPR_FECHA.format(col=columna)
 
 
-# =====================================================
-# 1. RESUMEN (agregado mensual)
-# =====================================================
+@st.cache_data(ttl=TTL, show_spinner=False)
+def tipos_encuesta_disponibles() -> list[str]:
+    """Consulta los tipos de encuesta disponibles desde la fuente maestra."""
+    df = query(f"""
+        SELECT DISTINCT UPPER(TRIM(tipo_encuesta)) AS tipo_encuesta
+        FROM {T_KPIS}
+        WHERE tipo_encuesta IS NOT NULL
+          AND TRIM(tipo_encuesta) <> ''
+        ORDER BY 1
+    """)
+    if df is None or df.empty or "tipo_encuesta" not in df.columns:
+        return []
+    return df["tipo_encuesta"].dropna().astype(str).str.strip().tolist()
+
 
 @st.cache_data(ttl=TTL, show_spinner=False)
 def resumen() -> pd.DataFrame:
-    """
-    Agregado mensual por línea y tipo de encuesta.
-    Fuente del 80% del tablero: KPIs, gauges, evolución, radar, heatmap.
-    NO contiene cod_suc.
-    """
+    """Agregado mensual por línea y tipo de encuesta."""
     return query(f"""
         SELECT
-            CAST(anio  AS INT)          AS anio,
-            CAST(mes   AS INT)          AS mes,
-            CAST(anio_mes AS STRING)    AS anio_mes,
-            UPPER(TRIM(tipo_encuesta))  AS tipo_encuesta,
-            UPPER(TRIM(linea))          AS linea,
-            CAST(encuestados   AS BIGINT)  AS encuestados,
-            CAST(avg_nps_score AS DOUBLE)  AS avg_nps_score,
-            CAST(avg_ins       AS DOUBLE)  AS avg_ins,
-            CAST(avg_ces       AS DOUBLE)  AS avg_ces,
-            CAST(promotores    AS BIGINT)  AS promotores,
-            CAST(neutros       AS BIGINT)  AS neutros,
-            CAST(detractores   AS BIGINT)  AS detractores
+            CAST(anio  AS INT)        AS anio,
+            CAST(mes   AS INT)        AS mes,
+            CAST(anio_mes AS STRING)  AS anio_mes,
+            UPPER(TRIM(tipo_encuesta)) AS tipo_encuesta,
+            UPPER(TRIM(linea))         AS linea,
+            CAST(encuestados   AS BIGINT) AS encuestados,
+            CAST(avg_nps_score AS DOUBLE) AS avg_nps_score,
+            CAST(avg_ins       AS DOUBLE) AS avg_ins,
+            CAST(avg_ces       AS DOUBLE) AS avg_ces,
+            CAST(promotores    AS BIGINT) AS promotores,
+            CAST(neutros       AS BIGINT) AS neutros,
+            CAST(detractores   AS BIGINT) AS detractores
         FROM {T_RESUMEN}
         WHERE anio_mes IS NOT NULL
         ORDER BY anio_mes DESC, tipo_encuesta, linea
     """)
 
 
-# =====================================================
-# 2. RESUMEN POR SUCURSAL
-# =====================================================
-
 @st.cache_data(ttl=TTL, show_spinner="Agregando por sucursal…")
 def resumen_por_sucursal() -> pd.DataFrame:
-    """
-    Mismo grano que resumen() pero abriendo cod_suc y canal.
-    Reagrega gold_cx_kpis en vivo porque gold_cx_resumen no tiene sucursal.
-
-    RECOMENDACIÓN: materializa esto como gold_cx_resumen_suc en tu notebook
-    de Gold para evitar el costo de reagregar en cada consulta.
-    """
+    """Reagrega KPIs abriendo sucursal para soportar el filtro de intermediarios."""
     return query(f"""
         SELECT
-            CAST(anio AS INT)            AS anio,
-            CAST(mes  AS INT)            AS mes,
-            CAST(anio_mes AS STRING)     AS anio_mes,
-            UPPER(TRIM(tipo_encuesta))   AS tipo_encuesta,
-            UPPER(TRIM(linea))           AS linea,
+            CAST(anio AS INT)         AS anio,
+            CAST(mes  AS INT)         AS mes,
+            CAST(anio_mes AS STRING)  AS anio_mes,
+            UPPER(TRIM(tipo_encuesta)) AS tipo_encuesta,
+            UPPER(TRIM(linea))         AS linea,
             COALESCE(NULLIF(TRIM(CAST(cod_suc AS STRING)), ''), 'SIN SUCURSAL') AS cod_suc,
-            COALESCE(NULLIF(TRIM(canal), ''), 'SIN CANAL')                      AS canal,
-
-            COUNT(*)                     AS encuestados,
-            AVG(CAST(nps_score    AS DOUBLE)) AS avg_nps_score,
-            AVG(CAST(ins_score    AS DOUBLE)) AS avg_ins,
+            COALESCE(NULLIF(TRIM(canal), ''), 'SIN CANAL') AS canal,
+            COUNT(*) AS encuestados,
+            AVG(CAST(nps_score AS DOUBLE)) AS avg_nps_score,
+            AVG(CAST(ins_score AS DOUBLE)) AS avg_ins,
             AVG(CAST(ces_promedio AS DOUBLE)) AS avg_ces,
-
             SUM(CASE WHEN UPPER(TRIM(nps_categoria)) = 'PROMOTOR'  THEN 1 ELSE 0 END) AS promotores,
             SUM(CASE WHEN UPPER(TRIM(nps_categoria)) = 'NEUTRO'    THEN 1 ELSE 0 END) AS neutros,
             SUM(CASE WHEN UPPER(TRIM(nps_categoria)) = 'DETRACTOR' THEN 1 ELSE 0 END) AS detractores
@@ -116,19 +110,9 @@ def resumen_por_sucursal() -> pd.DataFrame:
     """)
 
 
-# =====================================================
-# 3. DRIVERS
-# =====================================================
-
 @st.cache_data(ttl=TTL, show_spinner=False)
 def drivers() -> pd.DataFrame:
-    """
-    Dolores y puntos de contacto.
-    Deriva anio_mes desde fecha y descompone tipo_driver en:
-      familia -> DOLOR | PUNTO_CONTACTO
-      metrica -> NPS | CES
-    Eso habilita la matriz Dolor vs. Punto de contacto y el Pareto.
-    """
+    """Consulta drivers con fecha parseada y anio_mes derivado."""
     fecha_expr = expr_fecha()
     return query(f"""
         WITH base AS (
@@ -136,17 +120,16 @@ def drivers() -> pd.DataFrame:
             FROM {T_DRIVERS}
         )
         SELECT
-            fecha_parsed                                       AS fecha,
-            DATE_FORMAT(fecha_parsed, 'yyyy-MM')               AS anio_mes,
-            UPPER(TRIM(tipo_encuesta))                         AS tipo_encuesta,
-            UPPER(TRIM(linea))                                 AS linea,
-            UPPER(TRIM(tipo_driver))                           AS tipo_driver,
-            INITCAP(TRIM(categoria))                           AS categoria,
-
+            fecha_parsed AS fecha,
+            DATE_FORMAT(fecha_parsed, 'yyyy-MM') AS anio_mes,
+            UPPER(TRIM(tipo_encuesta)) AS tipo_encuesta,
+            UPPER(TRIM(linea)) AS linea,
+            UPPER(TRIM(tipo_driver)) AS tipo_driver,
+            INITCAP(TRIM(categoria)) AS categoria,
             CASE WHEN UPPER(tipo_driver) LIKE 'DOLOR%'
-                 THEN 'DOLOR' ELSE 'PUNTO_CONTACTO' END        AS familia,
+                 THEN 'DOLOR' ELSE 'PUNTO_CONTACTO' END AS familia,
             CASE WHEN UPPER(tipo_driver) LIKE '%CES'
-                 THEN 'CES' ELSE 'NPS' END                     AS metrica
+                 THEN 'CES' ELSE 'NPS' END AS metrica
         FROM base
         WHERE categoria IS NOT NULL
           AND TRIM(categoria) <> ''
@@ -155,22 +138,9 @@ def drivers() -> pd.DataFrame:
     """)
 
 
-# =====================================================
-# 4. VERBATIMS
-# =====================================================
-
 @st.cache_data(ttl=TTL, show_spinner=False)
 def verbatims(limite: int = 20000) -> pd.DataFrame:
-    """
-    Comentarios abiertos. Alimenta tabla, sentimiento BERT y copiloto.
-
-    Columna derivada `intermediario`: para tipo_encuesta = INTERMEDIARIO
-    toma nombre_completo (o documento como respaldo). Es lo que habilita
-    el ranking de "intermediarios con más comentarios malos".
-
-    `es_negativo` viene de tipo_comentario, ya etiquetado por la encuesta:
-    el ranking funciona SIN ejecutar ningún modelo de IA.
-    """
+    """Consulta comentarios abiertos con filtros homogéneos para el tablero."""
     fecha_expr = expr_fecha()
     return query(f"""
         WITH base AS (
@@ -178,28 +148,21 @@ def verbatims(limite: int = 20000) -> pd.DataFrame:
             FROM {T_VERBATIMS}
         )
         SELECT
-            fecha_parsed                                 AS fecha,
-            DATE_FORMAT(fecha_parsed, 'yyyy-MM')         AS anio_mes,
-            UPPER(TRIM(tipo_encuesta))                   AS tipo_encuesta,
-            UPPER(TRIM(linea))                           AS linea,
-
+            fecha_parsed AS fecha,
+            DATE_FORMAT(fecha_parsed, 'yyyy-MM') AS anio_mes,
+            UPPER(TRIM(tipo_encuesta)) AS tipo_encuesta,
+            UPPER(TRIM(linea)) AS linea,
             documento,
-            TRIM(nombre_completo)                        AS nombre_completo,
+            TRIM(nombre_completo) AS nombre_completo,
             COALESCE(NULLIF(TRIM(CAST(cod_suc AS STRING)), ''), 'SIN SUCURSAL') AS cod_suc,
-            COALESCE(NULLIF(TRIM(canal), ''), 'SIN CANAL')                      AS canal,
-
-            INITCAP(TRIM(nps_categoria))                 AS nps_categoria,
-            UPPER(TRIM(tipo_comentario))                 AS tipo_comentario,
-            TRIM(texto)                                  AS texto,
-
+            COALESCE(NULLIF(TRIM(canal), ''), 'SIN CANAL') AS canal,
+            INITCAP(TRIM(nps_categoria)) AS nps_categoria,
+            UPPER(TRIM(tipo_comentario)) AS tipo_comentario,
+            TRIM(texto) AS texto,
             CASE WHEN UPPER(TRIM(tipo_encuesta)) = 'INTERMEDIARIO'
-                 THEN COALESCE(NULLIF(TRIM(nombre_completo), ''),
-                               CAST(documento AS STRING),
-                               'SIN NOMBRE')
-                 ELSE NULL END                           AS intermediario,
-
-            CASE WHEN UPPER(TRIM(tipo_comentario)) = 'DETRACTOR'
-                 THEN 1 ELSE 0 END                       AS es_negativo
+                 THEN COALESCE(NULLIF(TRIM(nombre_completo), ''), CAST(documento AS STRING), 'SIN NOMBRE')
+                 ELSE NULL END AS intermediario,
+            CASE WHEN UPPER(TRIM(tipo_comentario)) = 'DETRACTOR' THEN 1 ELSE 0 END AS es_negativo
         FROM base
         WHERE texto IS NOT NULL
           AND LENGTH(TRIM(texto)) > 3
@@ -210,23 +173,15 @@ def verbatims(limite: int = 20000) -> pd.DataFrame:
     """)
 
 
-# =====================================================
-# 5. RANKING DE NEGATIVOS (agregado en el warehouse)
-# =====================================================
-
 @st.cache_data(ttl=TTL, show_spinner=False)
-def ranking_negativos_sql(dimension: str = "intermediario",
-                          anio_mes: str | None = None,
-                          linea: str | None = None,
-                          minimo: int = 5,
-                          top: int = 20) -> pd.DataFrame:
-    """
-    Ranking de comentarios negativos calculado en el warehouse.
-    Úsalo cuando el volumen de verbatims sea grande: evita traer
-    todas las filas a la app solo para agrupar.
-
-    dimension admitida: intermediario | cod_suc | canal | linea
-    """
+def ranking_negativos_sql(
+    dimension: str = "intermediario",
+    anio_mes: str | None = None,
+    linea: str | None = None,
+    minimo: int = 5,
+    top: int = 20,
+) -> pd.DataFrame:
+    """Calcula el ranking de negativos directamente en el warehouse."""
     permitidas = {
         "intermediario": "COALESCE(NULLIF(TRIM(nombre_completo),''), CAST(documento AS STRING))",
         "cod_suc": "COALESCE(NULLIF(TRIM(CAST(cod_suc AS STRING)),''), 'SIN SUCURSAL')",
@@ -234,8 +189,7 @@ def ranking_negativos_sql(dimension: str = "intermediario",
         "linea": "UPPER(TRIM(linea))",
     }
     if dimension not in permitidas:
-        raise ValueError(f"Dimensión no permitida: {dimension}")  # evita inyección SQL
-
+        raise ValueError(f"Dimensión no permitida: {dimension}")
     expr = permitidas[dimension]
     filtros = ["texto IS NOT NULL", "LENGTH(TRIM(texto)) > 3"]
     if dimension == "intermediario":
@@ -246,9 +200,7 @@ def ranking_negativos_sql(dimension: str = "intermediario",
         filtros.append(f"DATE_FORMAT(fecha_parsed, 'yyyy-MM') = '{anio_mes}'")
     if linea and linea.upper() != "TODAS":
         filtros.append(f"UPPER(TRIM(linea)) = '{linea.upper()}'")
-
     where = " AND ".join(filtros)
-
     return query(f"""
         WITH base AS (
             SELECT *, {fecha_expr} AS fecha_parsed
@@ -258,61 +210,45 @@ def ranking_negativos_sql(dimension: str = "intermediario",
             {expr} AS {dimension},
             COUNT(*) AS total,
             SUM(CASE WHEN UPPER(TRIM(tipo_comentario)) = 'DETRACTOR' THEN 1 ELSE 0 END) AS negativos,
-            ROUND(
-                100.0 * SUM(CASE WHEN UPPER(TRIM(tipo_comentario)) = 'DETRACTOR' THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(*), 0), 1
-            ) AS pct_negativos
+            ROUND(SUM(CASE WHEN UPPER(TRIM(tipo_comentario)) = 'DETRACTOR' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS porcentaje_negativos
         FROM base
         WHERE {where}
         GROUP BY {expr}
         HAVING COUNT(*) >= {int(minimo)}
-        ORDER BY negativos DESC, pct_negativos DESC
+        ORDER BY negativos DESC, porcentaje_negativos DESC, total DESC
         LIMIT {int(top)}
     """)
 
 
-# =====================================================
-# 6. DIAGNÓSTICO
-# =====================================================
-
 @st.cache_data(ttl=TTL, show_spinner=False)
 def diagnostico() -> pd.DataFrame:
-    """Verifica que las 4 tablas Gold existan y tengan datos. Útil al desplegar."""
-    exprs_fecha = {
-        "gold_cx_kpis": expr_fecha(),
-        "gold_cx_resumen": "TRY_TO_DATE(CONCAT(TRIM(anio_mes), '-01'), 'yyyy-MM-dd')",
+    """Resume parseabilidad de fechas y conteos de tablas Gold."""
+    consultas = {
+        "gold_cx_resumen": "anio_mes IS NOT NULL",
+        "gold_cx_kpis": "anio_mes IS NOT NULL",
         "gold_cx_drivers": expr_fecha(),
         "gold_cx_verbatims": expr_fecha(),
     }
-    filas = []
-    for nombre, tabla in [("gold_cx_kpis", T_KPIS), ("gold_cx_resumen", T_RESUMEN),
-                          ("gold_cx_drivers", T_DRIVERS), ("gold_cx_verbatims", T_VERBATIMS)]:
-        try:
-            r = query(f"""
-                WITH base AS (
-                    SELECT {exprs_fecha[nombre]} AS fecha_parsed
-                    FROM {tabla}
-                )
+    filas: list[dict[str, object]] = []
+    for tabla, condicion in consultas.items():
+        if "(" in condicion:
+            sql = f"""
                 SELECT
-                    COUNT(*) AS filas,
-                    SUM(CASE WHEN fecha_parsed IS NOT NULL THEN 1 ELSE 0 END) AS fecha_parseable,
-                    SUM(CASE WHEN fecha_parsed IS NULL THEN 1 ELSE 0 END) AS fecha_no_parseable
-                FROM base
-            """)
-            filas.append({
-                "tabla": nombre,
-                "estado": "OK",
-                "filas": int(r.iloc[0]["filas"]),
-                "fecha_parseable": int(r.iloc[0]["fecha_parseable"]),
-                "fecha_no_parseable": int(r.iloc[0]["fecha_no_parseable"]),
-            })
-        except Exception as e:
-            filas.append({
-                "tabla": nombre,
-                "estado": type(e).__name__,
-                "filas": 0,
-                "fecha_parseable": 0,
-                "fecha_no_parseable": 0,
-                "detalle": str(e)[:200],
-            })
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN {condicion} IS NOT NULL THEN 1 ELSE 0 END) AS fecha_parseable,
+                    SUM(CASE WHEN {condicion} IS NULL THEN 1 ELSE 0 END) AS fecha_no_parseable
+                FROM {CATALOGO}.{ESQUEMA}.{tabla}
+            """
+        else:
+            sql = f"""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) AS fecha_parseable,
+                    0 AS fecha_no_parseable
+                FROM {CATALOGO}.{ESQUEMA}.{tabla}
+                WHERE {condicion}
+            """
+        resultado = query(sql)
+        registro = resultado.iloc[0].to_dict() if resultado is not None and not resultado.empty else {}
+        filas.append({"tabla": tabla, **registro})
     return pd.DataFrame(filas)
