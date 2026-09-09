@@ -15,9 +15,26 @@ APP = (REPO / "app.py").read_text(encoding="utf-8")
 class SourceRegressionTests(unittest.TestCase):
     def test_consultas_define_expr_fecha_robusta(self):
         self.assertIn("EXPR_FECHA =", CONSULTAS)
-        self.assertIn("TRY_TO_DATE(TRIM({col}), 'M/d/yy')", CONSULTAS)
-        self.assertIn("TRY_TO_DATE(TRIM({col}), 'yyyy-MM-dd')", CONSULTAS)
         self.assertIn("TRY_CAST({col} AS DATE)", CONSULTAS)
+        self.assertIn("CAST(TRY_CAST({col} AS TIMESTAMP) AS DATE)", CONSULTAS)
+        self.assertIn("TRY_TO_DATE(TRIM(CAST({col} AS STRING)), 'yyyy-MM-dd HH:mm:ss')", CONSULTAS)
+        self.assertIn("TRY_TO_DATE(TRIM(CAST({col} AS STRING)), 'M/d/yy')", CONSULTAS)
+        
+    def test_consultas_define_expr_anio_mes_defensiva(self):
+        self.assertIn("EXPR_ANIO_MES =", CONSULTAS)
+        self.assertIn("NULLIF(TRIM(CAST({col_anio_mes} AS STRING)), '')", CONSULTAS)
+        self.assertIn("DATE_FORMAT({col_fecha}, 'yyyy-MM')", CONSULTAS)
+
+    def test_resumen_por_sucursal_rellena_anio_mes_sin_filtrar_crudo(self):
+        self.assertIn("def resumen_por_sucursal()", CONSULTAS)
+        self.assertIn("anio_mes_resuelto", CONSULTAS)
+        self.assertIn("COALESCE(CAST(anio AS INT), YEAR(fecha_parsed)) AS anio_resuelto", CONSULTAS)
+        self.assertIn("WHERE anio_mes_resuelto IS NOT NULL", CONSULTAS)
+
+    def test_verbatims_prioriza_anio_mes_gold(self):
+        self.assertIn("def verbatims(limite: int = 20000)", CONSULTAS)
+        self.assertIn("anio_mes_resuelto AS anio_mes", CONSULTAS)
+        self.assertIn("AND anio_mes_resuelto IS NOT NULL", CONSULTAS)
 
     def test_consultas_expone_tipos_disponibles_desde_kpis(self):
         self.assertIn("def tipos_encuesta_disponibles()", CONSULTAS)

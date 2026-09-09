@@ -34,9 +34,18 @@ T_VERBATIMS = f"{CATALOGO}.{ESQUEMA}.gold_cx_verbatims"
 TTL = 900
 EXPR_FECHA = """
 COALESCE(
-    TRY_TO_DATE(TRIM({col}), 'M/d/yy'),
-    TRY_TO_DATE(TRIM({col}), 'yyyy-MM-dd'),
-    TRY_CAST({col} AS DATE)
+    TRY_CAST({col} AS DATE),
+    CAST(TRY_CAST({col} AS TIMESTAMP) AS DATE),
+    TRY_TO_DATE(TRIM(CAST({col} AS STRING)), 'yyyy-MM-dd HH:mm:ss.SSS'),
+    TRY_TO_DATE(TRIM(CAST({col} AS STRING)), 'yyyy-MM-dd HH:mm:ss'),
+    TRY_TO_DATE(TRIM(CAST({col} AS STRING)), 'yyyy-MM-dd'),
+    TRY_TO_DATE(TRIM(CAST({col} AS STRING)), 'M/d/yy')
+)
+""".strip()
+EXPR_ANIO_MES = """
+COALESCE(
+    NULLIF(TRIM(CAST({col_anio_mes} AS STRING)), ''),
+    DATE_FORMAT({col_fecha}, 'yyyy-MM')
 )
 """.strip()
 
@@ -44,6 +53,11 @@ COALESCE(
 def expr_fecha(columna: str = "fecha") -> str:
     """Devuelve la expresión SQL robusta para parsear fechas."""
     return EXPR_FECHA.format(col=columna)
+
+
+def expr_anio_mes(columna_anio_mes: str = "anio_mes", columna_fecha: str = "fecha") -> str:
+    """Prioriza anio_mes existente y solo lo deriva desde la fecha si falta."""
+    return EXPR_ANIO_MES.format(col_anio_mes=columna_anio_mes, col_fecha=columna_fecha)
 
 
 @st.cache_data(ttl=TTL, show_spinner=False)
@@ -87,26 +101,47 @@ def resumen() -> pd.DataFrame:
 @st.cache_data(ttl=TTL, show_spinner="Agregando por sucursal…")
 def resumen_por_sucursal() -> pd.DataFrame:
     """Reagrega KPIs abriendo sucursal para soportar el filtro de intermediarios."""
+    fecha_expr = expr_fecha()
+    anio_mes_expr = expr_anio_mes(columna_fecha="fecha_parsed")
     return query(f"""
+        WITH raw AS (
+            SELECT *, {fecha_expr} AS fecha_parsed
+            FROM {T_KPIS}
+        ),
+        base AS (
+            SELECT
+                COALESCE(CAST(anio AS INT), YEAR(fecha_parsed)) AS anio_resuelto,
+                COALESCE(CAST(mes AS INT), MONTH(fecha_parsed)) AS mes_resuelto,
+                {anio_mes_expr} AS anio_mes_resuelto,
+                UPPER(TRIM(tipo_encuesta)) AS tipo_encuesta,
+                UPPER(TRIM(linea)) AS linea,
+                COALESCE(NULLIF(TRIM(CAST(cod_suc AS STRING)), ''), 'SIN SUCURSAL') AS cod_suc,
+                COALESCE(NULLIF(TRIM(CAST(canal AS STRING)), ''), 'SIN CANAL') AS canal,
+                CAST(nps_score AS DOUBLE) AS nps_score,
+                CAST(ins_score AS DOUBLE) AS ins_score,
+                CAST(ces_promedio AS DOUBLE) AS ces_promedio,
+                UPPER(TRIM(nps_categoria)) AS nps_categoria
+            FROM raw
+        )
         SELECT
-            CAST(anio AS INT)         AS anio,
-            CAST(mes  AS INT)         AS mes,
-            CAST(anio_mes AS STRING)  AS anio_mes,
-            UPPER(TRIM(tipo_encuesta)) AS tipo_encuesta,
-            UPPER(TRIM(linea))         AS linea,
-            COALESCE(NULLIF(TRIM(CAST(cod_suc AS STRING)), ''), 'SIN SUCURSAL') AS cod_suc,
-            COALESCE(NULLIF(TRIM(canal), ''), 'SIN CANAL') AS canal,
+            anio_resuelto AS anio,
+            mes_resuelto AS mes,
+            anio_mes_resuelto AS anio_mes,
+            tipo_encuesta,
+            linea,
+            cod_suc,
+            canal,
             COUNT(*) AS encuestados,
-            AVG(CAST(nps_score AS DOUBLE)) AS avg_nps_score,
-            AVG(CAST(ins_score AS DOUBLE)) AS avg_ins,
-            AVG(CAST(ces_promedio AS DOUBLE)) AS avg_ces,
-            SUM(CASE WHEN UPPER(TRIM(nps_categoria)) = 'PROMOTOR'  THEN 1 ELSE 0 END) AS promotores,
-            SUM(CASE WHEN UPPER(TRIM(nps_categoria)) = 'NEUTRO'    THEN 1 ELSE 0 END) AS neutros,
-            SUM(CASE WHEN UPPER(TRIM(nps_categoria)) = 'DETRACTOR' THEN 1 ELSE 0 END) AS detractores
-        FROM {T_KPIS}
-        WHERE anio_mes IS NOT NULL
-        GROUP BY anio, mes, anio_mes, tipo_encuesta, linea, cod_suc, canal
-        ORDER BY anio_mes DESC, linea, cod_suc
+            AVG(nps_score) AS avg_nps_score,
+            AVG(ins_score) AS avg_ins,
+            AVG(ces_promedio) AS avg_ces,
+            SUM(CASE WHEN nps_categoria = 'PROMOTOR'  THEN 1 ELSE 0 END) AS promotores,
+            SUM(CASE WHEN nps_categoria = 'NEUTRO'    THEN 1 ELSE 0 END) AS neutros,
+            SUM(CASE WHEN nps_categoria = 'DETRACTOR' THEN 1 ELSE 0 END) AS detractores
+        FROM base
+        WHERE anio_mes_resuelto IS NOT NULL
+        GROUP BY anio_resuelto, mes_resuelto, anio_mes_resuelto, tipo_encuesta, linea, cod_suc, canal
+        ORDER BY anio_mes_resuelto DESC, linea, cod_suc
     """)
 
 
@@ -142,32 +177,49 @@ def drivers() -> pd.DataFrame:
 def verbatims(limite: int = 20000) -> pd.DataFrame:
     """Consulta comentarios abiertos con filtros homogéneos para el tablero."""
     fecha_expr = expr_fecha()
+    anio_mes_expr = expr_anio_mes(columna_fecha="fecha_parsed")
     return query(f"""
         WITH base AS (
             SELECT *, {fecha_expr} AS fecha_parsed
             FROM {T_VERBATIMS}
+        ),
+        normalizada AS (
+            SELECT
+                fecha_parsed,
+                {anio_mes_expr} AS anio_mes_resuelto,
+                UPPER(TRIM(tipo_encuesta)) AS tipo_encuesta,
+                UPPER(TRIM(linea)) AS linea,
+                documento,
+                TRIM(nombre_completo) AS nombre_completo,
+                COALESCE(NULLIF(TRIM(CAST(cod_suc AS STRING)), ''), 'SIN SUCURSAL') AS cod_suc,
+                COALESCE(NULLIF(TRIM(CAST(canal AS STRING)), ''), 'SIN CANAL') AS canal,
+                INITCAP(TRIM(nps_categoria)) AS nps_categoria,
+                UPPER(TRIM(tipo_comentario)) AS tipo_comentario,
+                TRIM(texto) AS texto
+            FROM base
         )
         SELECT
             fecha_parsed AS fecha,
-            DATE_FORMAT(fecha_parsed, 'yyyy-MM') AS anio_mes,
-            UPPER(TRIM(tipo_encuesta)) AS tipo_encuesta,
-            UPPER(TRIM(linea)) AS linea,
+            anio_mes_resuelto AS anio_mes,
+            tipo_encuesta,
+            linea,
             documento,
-            TRIM(nombre_completo) AS nombre_completo,
-            COALESCE(NULLIF(TRIM(CAST(cod_suc AS STRING)), ''), 'SIN SUCURSAL') AS cod_suc,
-            COALESCE(NULLIF(TRIM(canal), ''), 'SIN CANAL') AS canal,
-            INITCAP(TRIM(nps_categoria)) AS nps_categoria,
-            UPPER(TRIM(tipo_comentario)) AS tipo_comentario,
-            TRIM(texto) AS texto,
-            CASE WHEN UPPER(TRIM(tipo_encuesta)) = 'INTERMEDIARIO'
-                 THEN COALESCE(NULLIF(TRIM(nombre_completo), ''), CAST(documento AS STRING), 'SIN NOMBRE')
+            nombre_completo,
+            cod_suc,
+            canal,
+            nps_categoria,
+            tipo_comentario,
+            texto,
+            CASE WHEN tipo_encuesta = 'INTERMEDIARIO'
+                 THEN COALESCE(NULLIF(nombre_completo, ''), CAST(documento AS STRING), 'SIN NOMBRE')
                  ELSE NULL END AS intermediario,
-            CASE WHEN UPPER(TRIM(tipo_comentario)) = 'DETRACTOR' THEN 1 ELSE 0 END AS es_negativo
-        FROM base
+            CASE WHEN tipo_comentario = 'DETRACTOR' THEN 1 ELSE 0 END AS es_negativo
+        FROM normalizada
         WHERE texto IS NOT NULL
           AND LENGTH(TRIM(texto)) > 3
           AND UPPER(TRIM(texto)) NOT IN ('N/A','NA','NINGUNO','NINGUNA','NO','SIN COMENTARIO','.','-')
           AND fecha_parsed IS NOT NULL
+          AND anio_mes_resuelto IS NOT NULL
         ORDER BY fecha_parsed DESC
         LIMIT {int(limite)}
     """)
@@ -224,10 +276,10 @@ def ranking_negativos_sql(
 def diagnostico() -> pd.DataFrame:
     """Resume parseabilidad de fechas y conteos de tablas Gold."""
     consultas = {
-        "gold_cx_resumen": "anio_mes IS NOT NULL",
-        "gold_cx_kpis": "anio_mes IS NOT NULL",
+        "gold_cx_resumen": "NULLIF(TRIM(CAST(anio_mes AS STRING)), '')",
+        "gold_cx_kpis": expr_anio_mes(columna_fecha=expr_fecha()),
         "gold_cx_drivers": expr_fecha(),
-        "gold_cx_verbatims": expr_fecha(),
+        "gold_cx_verbatims": expr_anio_mes(columna_fecha=expr_fecha()),
     }
     filas: list[dict[str, object]] = []
     for tabla, condicion in consultas.items():
