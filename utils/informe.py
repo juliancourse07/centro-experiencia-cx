@@ -9,6 +9,7 @@ from html import escape
 import pandas as pd
 
 from utils.estilos import PALETA
+from utils.tablero import deduplicar_columnas
 
 
 def slug(valor: str) -> str:
@@ -27,6 +28,7 @@ def nombre_archivo_base(dataset: str, periodo: str, linea: str, tipo: str, sucur
 
 def dataframe_a_csv_bytes(df: pd.DataFrame) -> bytes:
     """Serializa un dataframe a CSV compatible con Excel en español."""
+    df = deduplicar_columnas(df) if df is not None else pd.DataFrame()
     return df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
 
 
@@ -35,7 +37,7 @@ def dataframes_a_xlsx_bytes(hojas: dict[str, pd.DataFrame]) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
         for nombre, dataframe in hojas.items():
-            dataframe.to_excel(writer, sheet_name=nombre[:31], index=False)
+            deduplicar_columnas(dataframe if dataframe is not None else pd.DataFrame()).to_excel(writer, sheet_name=nombre[:31], index=False)
     return buffer.getvalue()
 
 
@@ -72,14 +74,53 @@ def generar_informe_excel(
         "metadatos": dataframe_metadatos(filtros),
         "kpis": dataframe_kpis(kpis),
     }
-    hojas.update({nombre: df for nombre, df in secciones.items() if df is not None})
+    hojas.update({nombre: deduplicar_columnas(df) for nombre, df in secciones.items() if df is not None})
     return dataframes_a_xlsx_bytes(hojas)
 
 
 def _tabla_html(df: pd.DataFrame, limite: int = 50) -> str:
     if df is None or df.empty:
         return "<p>Sin datos para esta sección.</p>"
-    return df.head(limite).to_html(index=False, border=0, classes="tabla")
+    return deduplicar_columnas(df).head(limite).to_html(index=False, border=0, classes="tabla")
+
+
+def construir_figuras_informe(
+    historico: pd.DataFrame,
+    comparativo: pd.DataFrame,
+    detalle: pd.DataFrame,
+    drivers_df: pd.DataFrame,
+    sentimiento_df: pd.DataFrame | None,
+) -> dict[str, object]:
+    """Arma las figuras del informe de forma perezosa y tolerante."""
+    from utils.graficos import (
+        figura_composicion_nps,
+        figura_delta_lineas,
+        figura_dispersion_lineas,
+        figura_drivers_pareto,
+        figura_evolucion,
+        figura_ranking_lineas,
+        figura_sunburst_sentimiento,
+        figura_temas_negativos,
+    )
+
+    figuras: dict[str, object] = {}
+    figuras["Evolución"] = figura_evolucion(historico)
+    figuras["Composición NPS"] = figura_composicion_nps(detalle)
+    figuras["Ranking entre líneas"] = figura_ranking_lineas(comparativo)
+    figuras["Volumen vs. desempeño"] = figura_dispersion_lineas(comparativo)
+    figuras["Brecha vs. compañía"] = figura_delta_lineas(comparativo)
+    if drivers_df is not None and not drivers_df.empty and "categoria" in drivers_df.columns:
+        pareto = drivers_df.groupby("categoria", as_index=False).size().rename(columns={"size": "menciones"})
+        figuras["Drivers"] = figura_drivers_pareto(pareto[["categoria", "menciones"]])
+    else:
+        figuras["Drivers"] = None
+    if sentimiento_df is not None and not sentimiento_df.empty:
+        figuras["Sentimiento"] = figura_sunburst_sentimiento(sentimiento_df)
+        figuras["Negativos por tema"] = figura_temas_negativos(sentimiento_df)
+    else:
+        figuras["Sentimiento"] = None
+        figuras["Negativos por tema"] = None
+    return figuras
 
 
 def generar_informe_html(
@@ -89,7 +130,7 @@ def generar_informe_html(
     figuras: dict[str, object],
 ) -> str:
     """Construye un informe HTML autocontenido imprimible a PDF."""
-    kpis_html = dataframe_kpis(kpis).to_html(index=False, border=0, classes="tabla")
+    kpis_html = deduplicar_columnas(dataframe_kpis(kpis)).to_html(index=False, border=0, classes="tabla")
     figuras_html = []
     include_js = True
     for nombre, figura in figuras.items():
