@@ -11,6 +11,8 @@ from collections.abc import Iterable
 import pandas as pd
 import streamlit as st
 
+from utils.tablero import COLS_NLP, deduplicar_columnas
+
 MODELO_SENT = os.getenv("CX_MODELO_SENT", "pysentimiento/robertuito-sentiment-analysis")
 MODELO_ZS = os.getenv("CX_MODELO_ZS", "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli")
 
@@ -196,6 +198,7 @@ def enriquecer(
     """Añade polaridad, emoción y tema con progreso visible por bloques."""
     if df is None or df.empty:
         return df
+    df = deduplicar_columnas(df)
     columna = col_texto(df)
     if columna is None:
         return df
@@ -230,9 +233,10 @@ def enriquecer(
                 estado.write("Refinando temas con clasificador avanzado (más lento).")
                 clasificados = _aplicar_zero_shot(textos, clasificados, batch_size, progress, 0.8, 1.0)
             for (_, texto, hash_id), resultado in zip(faltantes, clasificados):
-                cache[hash_id] = {**resultado, "_texto": texto}
+                cache[hash_id] = dict(resultado)
         progress.progress(1.0, text="Análisis completado")
         estado.update(label="Análisis de sentimiento completado", state="complete")
+    base = base.drop(columns=[columna for columna in COLS_NLP if columna in base.columns], errors="ignore")
     filas = []
     for hash_id, texto in zip(hashes, base["_texto"]):
         if hash_id in cache:
@@ -244,7 +248,6 @@ def enriquecer(
                 "tema": None,
                 "score": None,
                 "confianza": None,
-                "_texto": texto,
             })
     resultado = pd.concat([base, pd.DataFrame(filas)], axis=1)
-    return resultado
+    return deduplicar_columnas(resultado)
