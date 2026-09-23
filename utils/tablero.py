@@ -275,12 +275,43 @@ def delta(actual: float | int | None, previo: float | int | None) -> float | Non
     return actual - previo
 
 
-def filtros_activos_texto(linea: str, tipo: str, periodo: str, sucursal: str) -> str:
+def filtros_activos_texto(
+    linea: str,
+    tipo: str,
+    periodo: str,
+    sucursal: str,
+    periodo_comparativo: str | None = None,
+) -> str:
     """Convierte los filtros activos en una cadena legible."""
     filtros = [f"línea={linea}", f"tipo={tipo}", f"período={periodo}"]
+    if periodo_comparativo and periodo_comparativo != "SIN COMPARACIÓN":
+        filtros.append(f"comparativo={periodo_comparativo}")
     if sucursal != "TODAS":
         filtros.append(f"sucursal={sucursal}")
     return ", ".join(filtros)
+
+
+def periodo_comparativo_resuelto(
+    periodo_actual: str,
+    periodos: Sequence[str],
+    periodo_comparativo: str | None,
+    modo_comparacion: str = "Período anterior",
+) -> tuple[str | None, str]:
+    """Resuelve el período de comparación respetando el comportamiento actual por defecto."""
+    if not periodos:
+        return None, "Sin comparación"
+    if modo_comparacion == "Sin comparación":
+        return None, "Sin comparación"
+    if modo_comparacion == "Periodo específico":
+        if not periodo_comparativo or periodo_comparativo == "SIN COMPARACIÓN":
+            return None, "Sin comparación"
+        if periodo_comparativo == periodo_actual:
+            return None, "Sin comparación"
+        return str(periodo_comparativo), str(periodo_comparativo)
+    idx = periodos.index(periodo_actual) if periodo_actual in periodos else 0
+    if idx + 1 < len(periodos):
+        return periodos[idx + 1], periodos[idx + 1]
+    return None, "Sin comparación"
 
 
 def card(
@@ -311,7 +342,6 @@ def card(
         f"<div class='kpi-foot'>{pie}</div></div>",
         unsafe_allow_html=True,
     )
-
 
 
 def sin_datos(mensaje: str) -> None:
@@ -474,6 +504,7 @@ def comparativo_lineas(df_actual: pd.DataFrame, df_previo: pd.DataFrame) -> pd.D
     detalle = salida[salida["linea"] != "TOTAL / Promedio compañía"].sort_values("nps", ascending=False, na_position="last")
     return deduplicar_columnas(pd.concat([detalle, total], ignore_index=True))
 
+
 def valores_union(*dataframes: pd.DataFrame, columna: str) -> list[str]:
     """Une valores no nulos de una columna presentes en varios dataframes."""
     valores: set[str] = set()
@@ -482,7 +513,6 @@ def valores_union(*dataframes: pd.DataFrame, columna: str) -> list[str]:
             serie = df[columna].dropna().astype(str).str.strip()
             valores |= {valor for valor in serie if valor and valor not in {"nan", "None"}}
     return sorted(valores)
-
 
 
 def construir_kpis(actual: pd.DataFrame, previo: pd.DataFrame, verb_filtrado: pd.DataFrame) -> dict[str, object]:
@@ -516,6 +546,97 @@ def construir_kpis(actual: pd.DataFrame, previo: pd.DataFrame, verb_filtrado: pd
         "color_ces": color_ces,
     }
 
+
+def riesgo_sucursal_por_indicador(
+    df_actual: pd.DataFrame,
+    df_previo: pd.DataFrame | None = None,
+    linea: str = "TODAS",
+    tipo: str = "TODOS",
+    periodo_actual: str | None = None,
+    periodo_previo: str | None = None,
+) -> pd.DataFrame:
+    """Construye una vista ejecutiva de riesgo por sucursal e indicador usando las mismas reglas del tablero."""
+    if df_actual is None or df_actual.empty:
+        return pd.DataFrame(columns=["sucursal", "indicador", "valor_actual", "meta", "estado", "variacion", "periodo_comparativo"])
+    datos = df_actual.copy()
+    if linea != "TODAS" and "linea" in datos.columns:
+        datos = datos[datos["linea"] == linea]
+    if tipo != "TODOS" and "tipo_encuesta" in datos.columns:
+        tipo_objetivo = normalizar_tipo(tipo)
+        if es_intermediario(tipo_objetivo):
+            datos = datos[datos["tipo_encuesta"].map(es_intermediario)]
+        else:
+            datos = datos[datos["tipo_encuesta"].map(normalizar_tipo) == tipo_objetivo]
+    sucursal_col = primera_col(datos, COLS_SUCURSAL)
+    if not sucursal_col:
+        return pd.DataFrame(columns=["sucursal", "indicador", "valor_actual", "meta", "estado", "variacion", "periodo_comparativo"])
+    base = datos.groupby(sucursal_col, dropna=False).agg(
+        encuestados=("encuestados", "sum"),
+        promotores=("promotores", "sum"),
+        neutros=("neutros", "sum"),
+        detractores=("detractores", "sum"),
+        avg_ins=("avg_ins", lambda s: (s * datos.loc[s.index, "encuestados"]).sum() / datos.loc[s.index, "encuestados"].sum() if "encuestados" in datos.columns and datos.loc[s.index, "encuestados"].sum() else s.mean()),
+        avg_ces=("avg_ces", lambda s: (s * datos.loc[s.index, "encuestados"]).sum() / datos.loc[s.index, "encuestados"].sum() if "encuestados" in datos.columns and datos.loc[s.index, "encuestados"].sum() else s.mean()),
+    ) if "encuestados" in datos.columns else datos.groupby(sucursal_col).size().reset_index(name="encuestados")
+    if isinstance(base, pd.DataFrame) and base.empty:
+        return pd.DataFrame(columns=["sucursal", "indicador", "valor_actual", "meta", "estado", "variacion", "periodo_comparativo"])
+    if not isinstance(base, pd.DataFrame):
+        return pd.DataFrame(columns=["sucursal", "indicador", "valor_actual", "meta", "estado", "variacion", "periodo_comparativo"])
+    filas: list[dict[str, object]] = []
+    for sucursal, fila in base.iterrows():
+        valores = {
+            "NPS": calcular_nps(pd.DataFrame({
+                "encuestados": [fila.get("encuestados", 0)],
+                "promotores": [fila.get("promotores", 0)],
+                "detractores": [fila.get("detractores", 0)],
+            })),
+            "INS": promedio_ponderado(pd.DataFrame({
+                "encuestados": [fila.get("encuestados", 0)],
+                "avg_ins": [fila.get("avg_ins")],
+            }), "avg_ins"),
+            "CES": promedio_ponderado(pd.DataFrame({
+                "encuestados": [fila.get("encuestados", 0)],
+                "avg_ces": [fila.get("avg_ces")],
+            }), "avg_ces"),
+        }
+        metas = {"NPS": 70.0, "INS": 9.0, "CES": 2.5}
+        previa = None
+        if df_previo is not None and not df_previo.empty:
+            previo_df = df_previo.copy()
+            if linea != "TODAS" and "linea" in previo_df.columns:
+                previo_df = previo_df[previo_df["linea"] == linea]
+            if tipo != "TODOS" and "tipo_encuesta" in previo_df.columns:
+                tipo_objetivo = normalizar_tipo(tipo)
+                if es_intermediario(tipo_objetivo):
+                    previo_df = previo_df[previo_df["tipo_encuesta"].map(es_intermediario)]
+                else:
+                    previo_df = previo_df[previo_df["tipo_encuesta"].map(normalizar_tipo) == tipo_objetivo]
+            prev_sucursal_col = primera_col(previo_df, COLS_SUCURSAL)
+            if prev_sucursal_col:
+                prev_group = previo_df[previo_df[prev_sucursal_col].astype(str) == str(sucursal)]
+                if not prev_group.empty:
+                    previa = {
+                        "NPS": calcular_nps(prev_group),
+                        "INS": promedio_ponderado(prev_group, "avg_ins"),
+                        "CES": promedio_ponderado(prev_group, "avg_ces"),
+                    }
+        for indicador, valor in valores.items():
+            if valor is None or pd.isna(valor):
+                continue
+            estado, _ = semaforo(indicador, valor)
+            variacion = None if previa is None or previa.get(indicador) is None else delta(valor, previa.get(indicador))
+            filas.append(
+                {
+                    "sucursal": str(sucursal),
+                    "indicador": indicador,
+                    "valor_actual": float(valor),
+                    "meta": float(metas[indicador]),
+                    "estado": estado,
+                    "variacion": None if variacion is None else float(variacion),
+                    "periodo_comparativo": periodo_previo or "sin comparación",
+                }
+            )
+    return pd.DataFrame(filas).sort_values(["sucursal", "indicador"]).reset_index(drop=True)
 
 
 def insights_tablero(kpis: dict[str, object], actual: pd.DataFrame, periodo_prev: str | None) -> pd.DataFrame:
