@@ -19,6 +19,7 @@ from utils.graficos import (
     figura_heatmap_ins,
     figura_radar_linea,
     figura_ranking_lineas,
+    figura_riesgo_sucursal,
     figura_sunburst_sentimiento,
     figura_temas_negativos,
     figura_vacia,
@@ -34,7 +35,6 @@ from utils.informe import (
 )
 from utils.tablero import (
     aplicar_filtros,
-    calcular_nps,
     card,
     comparativo_lineas,
     construir_kpis,
@@ -52,6 +52,7 @@ from utils.tablero import (
     normalizar_tipo,
     opciones_linea,
     opciones_periodo,
+    riesgo_sucursal_por_indicador,
     sin_datos,
     sucursales_disponibles,
     valores_union,
@@ -158,7 +159,7 @@ def diagnostico_vacio(tipo: str, fuente_label: str, df_base: pd.DataFrame, df_su
         "gold_cx_drivers": 0 if drv is None else len(drv),
         "gold_cx_verbatims": 0 if verb is None else len(verb),
     }
-    tipos_kpis = ", ".join(sorted(df_sucursal["tipo_encuesta"].dropna().astype(str).unique())) if df_sucursal is not None and not df_sucursal.empty and "tipo_encuesta" in df_sucursal.columns else "sin datos"
+    tipos_kpis = ", ".join(sorted(df_sucursal["tipo_encuesta"].dropna().astype(str).unique())) if df_sucursal is not None and not df_sucursal.empty and "tipo_encuesta" in df_sucursal.columns else "SIN DATOS"
     return (
         f"No hay datos para los filtros activos. Fuente usada: {fuente_label}. "
         f"Filas cargadas sin filtrar → resumen={conteos['gold_cx_resumen']:,}, kpis={conteos['gold_cx_kpis']:,}, "
@@ -224,6 +225,20 @@ with st.sidebar:
             st.info(f"El período {periodo_guardado} no tiene datos para {normalizar_tipo(tipo)}; se seleccionó {periodos[0]}.")
         st.session_state["f_periodo"] = periodos[0]
     periodo = st.selectbox("Período", periodos, key="f_periodo", help="Muestra solo períodos con datos para el tipo seleccionado.")
+
+    opciones_comp = ["Sin comparación", *periodos]
+    periodo_comp_guardado = st.session_state.get("f_periodo_comp", "Sin comparación")
+    if periodo_comp_guardado not in opciones_comp:
+        st.session_state["f_periodo_comp"] = "Sin comparación"
+    periodo_comparativo = st.selectbox(
+        "Período comparativo",
+        opciones_comp,
+        key="f_periodo_comp",
+        help="Segundo período para comparar con el general. Si se deja en 'Sin comparación', la aplicación conserva el comportamiento actual.",
+    )
+    if periodo_comparativo == "Sin comparación":
+        periodo_comparativo = None
+
     lineas = opciones_linea(tipo, periodo, df_base, df_sucursal)
     linea_guardada = st.session_state.get("f_linea", "TODAS")
     if linea_guardada not in lineas:
@@ -251,7 +266,7 @@ with st.sidebar:
         st.session_state.pop("f_suc", None)
         sucursal = "TODAS"
     if st.button("Limpiar filtros", use_container_width=True):
-        st.session_state.update(f_tipo="TODOS", f_periodo=periodos[0], f_linea="TODAS")
+        st.session_state.update(f_tipo="TODOS", f_periodo=periodos[0], f_linea="TODAS", f_periodo_comp="Sin comparación")
         st.session_state.pop("f_suc", None)
         st.session_state.pop("verb_nlp", None)
         st.session_state.pop("verb_nlp_firma", None)
@@ -279,14 +294,18 @@ dfa = aplicar_filtros(df_fuente, linea=linea, tipo=tipo, periodo=periodo, sucurs
 dfh = aplicar_filtros(df_fuente, linea=linea, tipo=tipo, periodo=periodo, sucursal=sucursal, con_periodo=False)
 idx = periodos.index(periodo)
 periodo_prev = periodos[idx + 1] if idx + 1 < len(periodos) else None
+periodo_comp_efectivo = periodo_comparativo if periodo_comparativo and periodo_comparativo != periodo else None
+if not periodo_comp_efectivo:
+    periodo_comp_efectivo = periodo_prev
+
 dfp = (
-    aplicar_filtros(df_fuente, linea=linea, tipo=tipo, periodo=periodo, sucursal=sucursal, periodo_valor=periodo_prev)
-    if periodo_prev
+    aplicar_filtros(df_fuente, linea=linea, tipo=tipo, periodo=periodo, sucursal=sucursal, periodo_valor=periodo_comp_efectivo)
+    if periodo_comp_efectivo
     else pd.DataFrame()
 )
 verb_f = aplicar_filtros(verb, linea=linea, tipo=tipo, periodo=periodo, sucursal=sucursal)
 drv_f = aplicar_filtros(drv, linea=linea, tipo=tipo, periodo=periodo, sucursal=sucursal)
-filtros_texto = filtros_activos_texto(linea, tipo, periodo, sucursal)
+filtros_texto = filtros_activos_texto(linea, tipo, periodo, sucursal, periodo_comparativo)
 kpis = construir_kpis(dfa, dfp, verb_f)
 comparativo = comparativo_lineas(dfa, dfp)
 if not comparativo.empty and not verb_f.empty and "linea" in verb_f.columns:
@@ -373,6 +392,34 @@ with tab_tablero:
         with col_h:
             titulo_seccion("termometro", "INS por línea y tipo")
             st.plotly_chart(figura_heatmap_ins(dfa), use_container_width=True)
+
+        if es_intermediario(tipo):
+            riesgo_df = riesgo_sucursal_por_indicador(
+                dfa,
+                dfp if not dfp.empty else None,
+                linea=linea,
+                tipo=tipo,
+                periodo_actual=periodo,
+                periodo_previo=periodo_comparativo or periodo_prev,
+            )
+            if not riesgo_df.empty:
+                titulo_seccion("alerta", "Riesgo por indicador por sucursal")
+                st.caption(f"Comparación activa: {periodo} vs. {periodo_comparativo or (periodo_prev or 'sin comparación')}")
+                r1, r2 = st.columns([1.2, 1.8])
+                with r1:
+                    st.plotly_chart(figura_riesgo_sucursal(riesgo_df), use_container_width=True)
+                with r2:
+                    st.dataframe(
+                        riesgo_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "valor_actual": st.column_config.NumberColumn("Valor actual", format="%.2f"),
+                            "meta": st.column_config.NumberColumn("Meta", format="%.2f"),
+                            "variacion": st.column_config.NumberColumn("Variación", format="%+,.2f"),
+                        },
+                    )
+
         titulo_seccion("comparativo", "Comparativo entre líneas")
         st.markdown(lectura_comparativo(comparativo))
         st.dataframe(
@@ -582,6 +629,7 @@ with tab_informe:
             "línea": linea,
             "sucursal": sucursal,
             "fuente_kpis": "resumen_por_sucursal" if df_fuente is df_sucursal else "resumen",
+            "comparativo": periodo_comparativo or (periodo_prev or "sin comparación"),
         }
         insights = deduplicar_columnas(insights_tablero(kpis, dfa, periodo_prev))
         tablas = {
